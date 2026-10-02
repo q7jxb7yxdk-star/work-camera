@@ -105,6 +105,12 @@ Preserve existing uncommitted changes before development. The developer performs
 
 No project-wide `LICENSE`, `COPYING`, or license statement was found. This document does not grant permission to use, modify, or distribute the project. Apple frameworks are governed by their SDK/platform terms, which do not replace a project license. Hardware-name mappings in [MediaStore.swift](Work%20Camera/MediaStore.swift) include a DeviceKit source comment, but the repository does not import DeviceKit or include its license file. Licensing of the mapping data requires separate clarification.
 
+## Privacy Policy
+
+[PRIVACY_POLICY.md](PRIVACY_POLICY.md) contains the English privacy policy for Work Camera, identifying Sunny Yu and the public contact email. It covers local media and OCR storage, permissions, Apple maps and address lookups, sharing, Photos, backups, retention, and deletion.
+
+The document must be available at a public, login-free HTTPS URL before that URL is entered in App Store Connect. Committing the Markdown source does not verify public access or add an in-app policy link. A bundled Privacy Manifest and an easily accessible in-app privacy-policy link remain separate submission tasks.
+
 ## Submission Regression Checks
 
 See [the manual device checklist](MANUAL_VALIDATION.md) for prioritized permission, recording interruption, storage, search deletion, large-library, 48 MP editing, and HDR/SDR checks. These scenarios remain **Externally unverified** for this revision. The recording completion callback preserves a file when AVFoundation reports successful completion even with an error. Deletion reconciles cached OCR before Search opens and attempts Report/INFO cleanup independently of album persistence; filesystem errors are reported rather than treated as successful cleanup.

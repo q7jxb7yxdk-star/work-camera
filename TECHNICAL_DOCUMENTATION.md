@@ -226,6 +226,8 @@ Photo capture uses `[WorkCamera Photo]` console prints for capture ID, camera/pr
 
 ## 11. Security and Privacy
 
+[PRIVACY_POLICY.md](PRIVACY_POLICY.md) is the English privacy-policy source, last updated October 2, 2026. It identifies Sunny Yu and the public contact email and describes the implemented local storage, Vision search, permission, MapKit, sharing, Photos, backup, and deletion boundaries. The document is not a Privacy Manifest and is not connected to an in-app policy screen or link. Its publicly accessible HTTPS URL must be verified separately before use in App Store Connect; repository publication alone does not establish that verification.
+
 Camera authorization is required before capture. Denied microphone permission can omit audio input during initial configuration; the source does not automatically rebuild an already configured session's audio input after permission changes. Location requests when-in-use permission and clears the latest fix on denial/failure. Photos uses add-only access in the save activity without reading the user's system library.
 
 Media, GPS, Reports, Keywords, and OCR text are stored in local sandbox files/UserDefaults. There is no app-defined encryption, explicit file-protection attribute, Keychain, database protection policy, or backup-exclusion setting. System backups cannot be assumed disabled, nor can data be guaranteed to stay on the device. Photos import, system/user backups, and user sharing have separate external data boundaries.
