@@ -1,8 +1,8 @@
 # Work Camera Technical Documentation
 
-This document is based on the seven Swift source files, Xcode project/workspace, scheme management, and asset catalog in the repository working directory on 2026-10-01. It includes existing uncommitted and untracked content. Historical memory, filenames, and UI labels are not treated as evidence of completed functionality. See the [README](README.md) for setup and usage.
+This document is based on the seven Swift source files, Xcode project/workspace, scheme management, and asset catalog inspected on 2026-10-01, with the updates below grounded in current source on 2026-10-02. Historical memory, filenames, and UI labels are not treated as evidence of completed functionality. See the [README](README.md) for setup and usage.
 
-Camera selection, app-controlled Auto Macro, and related validation notes were updated on 2026-10-02 against the current `CameraService.swift`. Other sections retain the original documentation scope.
+Camera selection, app-controlled Auto Macro, Home Screen quick actions, direct Library navigation, privacy-manifest declarations, and related validation notes were updated on 2026-10-02 against current source and configuration. Other sections retain the original documentation scope.
 
 ## 1. System Overview and Evidence Categories
 
@@ -10,10 +10,10 @@ Work Camera has a single iPhone application target. The normal entry path is `My
 
 | Status | Meaning and current evidence |
 | --- | --- |
-| **Implemented** | Source exists and is called by the normal UI/lifecycle; capture, Library, albums, search, editing, Reports, templates, sharing, and the Photos activity meet this definition |
+| **Implemented** | Source exists and is called by the normal UI/lifecycle; capture, Library, albums, search, editing, Reports, templates, Home Screen quick actions, sharing, and the Photos activity meet this definition |
 | **Test-covered** | Corresponding automated tests exist, independently of whether they were run; no tests or test target were found, so there is no coverage to list |
 | **Verified in this task** | Limited to the successful static checks in Section 12; does not establish an app build or runtime result |
-| **Externally unverified** | Device capabilities, capture output, SDK type compatibility, location, MapKit, Photos, signing, and receiving-app behavior remain unverified except for the specific user-supplied macro runs recorded in Section 12 |
+| **Externally unverified** | Device capabilities, capture output, SDK type compatibility, location, MapKit, Photos, signing, receiving-app behavior, and the final quick-action ordering/navigation fixes remain unverified except for the specific user-supplied observations recorded in Section 12 |
 | **Experimental / Inactive** | Remaining `favorite` keys/cleanup have no UI for creating or displaying favorites; root-level PNGs are not referenced by the AppIcon manifest |
 | **Planned / Not implemented** | Recommendations in Section 15 have no completed implementation |
 
@@ -45,6 +45,18 @@ The composition root is the `@StateObject` ownership in `ContentView`. Library a
 
 Opening Library cancels the countdown, closes camera control panels, and calls `camera.stop()`. Returning to the active camera starts it again while preserving zoom. Entering the background only marks zoom for reset on the next start; the source does not stop the session for every scenePhase transition away from active. During recording, `stop()` updates wantsRunning/location state and then returns early without automatically ending recording. Background recording must not be treated as verified.
 
+`ContentView` switches its root content between the camera page and `NavigationStack` containing `LibraryView`; Library is no longer presented as a full-screen cover over the camera. `CameraWindowSceneReader` resolves the scene independently of `CameraPreview`. Until the scene is known, the root displays the system background. Pending launch actions are consumed before the camera page is created. Returning from Library reinserts the camera page, whose task starts capture when active; `CameraService` and `MediaStore` remain owned by the parent view.
+
+### 2.1 Home Screen Quick Actions
+
+`CameraAppDelegate.application(_:didFinishLaunchingWithOptions:)` registers three dynamic `UIApplicationShortcutItem` values: `workcamera.open.library`, `workcamera.open.collections`, and `workcamera.open.templates`. Their titles are Library, Collections, and Templates, with matching SF Symbol icons. Dynamic registration requires launching the app once after installation or an update.
+
+Cold-launch selection is read from `UIScene.ConnectionOptions.shortcutItem` during scene configuration. Selection for an existing scene is received by `CameraSceneDelegate.windowScene(_:performActionFor:completionHandler:)`. Both enqueue a UUID-tagged request in `CameraQuickActionRouter`, keyed by `UISceneSession.persistentIdentifier`. `ContentView` consumes requests for its own scene as soon as the scene is available, including while inactive, and opens the corresponding Library tab directly.
+
+`LibraryView` initializes its tab from the request before its first render. `applyQuickAction()` applies each request UUID once, dismisses detail/template presentations, clears selection and album/filter/search scope, and loads saved templates when requested. Subsequent appearances do not reapply the same request.
+
+Registration uses `CameraQuickAction.allCases.reversed()`, producing Templates → Collections → Library in the array. This responds to the user's observed reverse display order and targets Library → Collections → Templates at the tested icon position. The final visible order remains manually unverified. The app does not control the placement of iOS system actions such as Edit Home Screen, Require Face ID, or Remove App.
+
 `CameraOrientationPolicy` tracks Library presentation by scene ID: the camera page stays portrait, while Library allows all orientations. Preview uses the sensor-to-portrait angle. Photos and videos use the capture rotation coordinator's horizon-level angle at the shutter or recording start. Button labels rotate with handset orientation and retain their last readable direction when the handset lies flat.
 
 The preview controller observes app/capture interruptions and runtime errors, covering stale frames with black. On foreground recovery, `CADisplayLink` waits up to three seconds for a running, uninterrupted session and a previewing layer. A timeout leaves the cover visible; a subsequent session-start or interruption-ended event retries. This protects preview presentation; it is not a complete session-reconstruction mechanism.
@@ -53,7 +65,7 @@ The preview controller observes app/capture interruptions and runtime errors, co
 
 | Source/configuration | Components and responsibilities |
 | --- | --- |
-| [MyApp.swift](Work%20Camera/MyApp.swift) | `MyApp`, `CameraAppDelegate`, `CameraSceneDelegate`, `CameraOrientationPolicy`; scene creation and orientation ownership |
+| [MyApp.swift](Work%20Camera/MyApp.swift) | `MyApp`, `CameraAppDelegate`, `CameraSceneDelegate`, `CameraQuickAction`, `CameraQuickActionRequest`, `CameraQuickActionRouter`, `CameraWindowSceneReader`, `CameraOrientationPolicy`; scene creation, shortcut routing, and orientation ownership |
 | [ContentView.swift](Work%20Camera/ContentView.swift) | `ContentView`, `ExposureRuler`, `CameraGrid`, `LibraryView`, `MediaDetailView`, Reports/templates, Info summaries, thumbnails, playback/zoom UIKit bridges, share payload, and Photos activity |
 | [CameraService.swift](Work%20Camera/CameraService.swift) | `CameraService`, capture/location delegates, `PhotoMetadataCustomizer`, `CameraPreview`, its controller, and layer view |
 | [MediaStore.swift](Work%20Camera/MediaStore.swift) | `MediaItem`, `MediaAlbum`, `VideoCaptureDetails`, `MediaStore`, and storage errors |
@@ -204,7 +216,7 @@ The only application target is `Work Camera`. Its legacy productName is `MyApp`,
 
 Settings include `SDKROOT = auto`, `SWIFT_VERSION = 5.0`, `SWIFT_APPROACHABLE_CONCURRENCY = YES`, `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, member import visibility, and generated localization strings. Debug enables testability and `-Onone`. Release uses whole-module compilation and disables assertions. There is no pinned compiler, minimum Xcode/host macOS version, or tool-version file.
 
-Info.plist is generated from build settings with display name Work Camera. It includes camera, microphone, location when-in-use, and Photos add usage descriptions; scene/launch generation; and four interface orientations. There is no separate Info.plist, privacy manifest, or entitlements file. Settings such as `ENABLE_APP_SANDBOX` and `REGISTER_APP_GROUPS` exist, but no entitlement file establishes an App Group identifier or corresponding runtime use. App Groups functionality cannot be claimed as complete.
+Info.plist is generated from build settings with display name Work Camera. It includes camera, microphone, location when-in-use, and Photos add usage descriptions; scene/launch generation; and four interface orientations. There is no separate Info.plist or entitlements file. [PrivacyInfo.xcprivacy](Work%20Camera/PrivacyInfo.xcprivacy) is present in the target's filesystem-synchronized source folder; archive resource inclusion remains manually unverified. Settings such as `ENABLE_APP_SANDBOX` and `REGISTER_APP_GROUPS` exist, but no entitlement file establishes an App Group identifier or corresponding runtime use. App Groups functionality cannot be claimed as complete.
 
 Signing is Automatic with a specific Team and bundle identifier. No private keys, certificates, provisioning profiles, or signing setup script are included. Documentation does not reproduce the Team value or credentials. Developers must select usable signing settings for physical devices.
 
@@ -226,6 +238,8 @@ Photo capture uses `[WorkCamera Photo]` console prints for capture ID, camera/pr
 
 ## 11. Security and Privacy
 
+The Privacy Manifest declares `NSPrivacyTracking = false`, empty tracking domains, and an empty collected-data list for the current implementation, which has no developer-operated data collection or tracking SDK. Local processing is distinct from developer collection; Apple services, user-directed sharing, Photos, and backups retain the boundaries described below. Required-reason declarations are `NSPrivacyAccessedAPICategoryUserDefaults` / `CA92.1` for app-only preferences, templates, and numbering; `NSPrivacyAccessedAPICategoryFileTimestamp` / `C617.1` for app-container media ordering and search invalidation; and `NSPrivacyAccessedAPICategorySystemBootTime` / `35F9.1` for in-app elapsed-time calculations. These declarations do not replace the privacy policy or App Store Connect questionnaire. Static plist/schema checks do not establish acceptance by Apple or inclusion in an archived product; manually inspect the archive's app bundle for `PrivacyInfo.xcprivacy` before uploading.
+
 [PRIVACY_POLICY.md](PRIVACY_POLICY.md) is the English privacy-policy source, last updated October 2, 2026. It identifies Sunny Yu and the public contact email and describes the implemented local storage, Vision search, permission, MapKit, sharing, Photos, backup, and deletion boundaries. The document is not a Privacy Manifest and is not connected to an in-app policy screen or link. Its publicly accessible HTTPS URL must be verified separately before use in App Store Connect; repository publication alone does not establish that verification.
 
 Camera authorization is required before capture. Denied microphone permission can omit audio input during initial configuration; the source does not automatically rebuild an already configured session's audio input after permission changes. Location requests when-in-use permission and clears the latest fix on denial/failure. Photos uses add-only access in the save activity without reading the user's system library.
@@ -239,6 +253,8 @@ Shared photo JPEGs are redrawn rather than copied with original metadata, but no
 ## 12. Testing and Validation in This Task
 
 There is no XCTest/Swift Testing source, test target, test scheme, fixture, offline test suite, or CI. `ENABLE_TESTABILITY` does not establish tests. **Test-covered: no repository evidence to list.**
+
+**2026-10-02 quick-action and documentation updates**: Source inspection confirms dynamic registration, separate cold-launch/existing-scene handlers, per-scene queued requests, direct root-page switching, initial tab selection, and reversed registration order. `swiftc -frontend -parse` succeeded for `MyApp.swift` and `ContentView.swift`, and `git diff --check` passed. Documentation was checked against those call paths. Syntax parsing does not establish SDK/API type compatibility or runtime correctness. The user reported a brief camera page during shortcut navigation and Templates → Collections → Library on screen before the respective fixes; there is no supplied device confirmation of either final fix. Manually check each action from cold launch and background, switching while Library/detail/template UI is open, returning to Camera, orientation, preserved zoom, and the visible order at the intended Home Screen icon position. Privacy-manifest plist syntax is checked separately; archive inclusion and submission acceptance remain unverified.
 
 **Verified during the original documentation revision** was limited to:
 
@@ -276,7 +292,7 @@ These are local checks used for documentation work, not repository scripts. The 
 
 ## 13. Known Limitations and Technical Debt
 
-- Tooling/platform: iOS `27.0`, newer APIs, and the synchronized project format require compatible Xcode. No toolchain is pinned or scheme shared, and key source/icon files remain untracked. A Git checkout may not reproduce this working directory.
+- Tooling/platform: iOS `27.0`, newer APIs, and the synchronized project format require compatible Xcode. No toolchain is pinned or scheme shared, and signing requires a usable Team; checkout alone does not establish a reproducible build.
 - Capture: There is no JPEG capture fallback; video now has an 8-bit SDR HEVC/H.264 fallback. The active format's maximum dimensions do not establish 48 MP on every lens. MovieFileOutput Dolby Vision output and edited HDR retention require actual file evidence. Auto Macro's lens-position thresholds are uncalibrated and cannot measure distance; they may misclassify low-light/low-detail scenes. Lens switching pauses during photo processing and recording, and unsupported ultra-wide zoom prevents automatic entry.
 - Lifecycle/concurrency: Directory scans, JSON/media writes, and full-photo rendering occur on MainActor; large libraries/images may block UI. Capture start/stop use a separate queue from other session mutations, without a fully serialized configuration abstraction or interruption-reconstruction state machine.
 - Persistence: There are 9,999 stem slots and no capacity prediction, rollback transaction, recovery journal, versioned migration, or import/backup tool. Orphaned sidecars can block allocation. Best-effort creation-date restoration can affect album identity.
@@ -298,7 +314,7 @@ The following designs are supported by source. Historical motivations without a 
 
 ## 15. Future Development
 
-All items below are **Planned / Not implemented (recommended directions)**. This task did not change source or configuration.
+All items below are **Planned / Not implemented (recommended directions)**. Documenting these recommendations does not implement them.
 
 - Add a testable filesystem dependency at the `MediaStore` boundary and tests for filename exhaustion, corrupt JSON, partial deletion, and sidecar rollback. Preserve the rule against silently overwriting malformed metadata.
 - Extract template, metadata, and sharing components from `ContentView.swift` while preserving the composition root, MainActor UI ownership, and editor save callbacks. Avoid adding provider credentials or external side effects directly to UI code.

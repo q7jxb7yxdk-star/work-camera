@@ -68,7 +68,7 @@ final class CameraAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        application.shortcutItems = CameraQuickAction.allCases.map { action in
+        application.shortcutItems = CameraQuickAction.allCases.reversed().map { action in
             UIApplicationShortcutItem(
                 type: action.shortcutType,
                 localizedTitle: action.title,
@@ -115,6 +115,45 @@ final class CameraSceneDelegate: NSObject, UIWindowSceneDelegate {
 
     func sceneDidDisconnect(_ scene: UIScene) {
         CameraOrientationPolicy.removeScene(scene)
+    }
+}
+
+// This reader remains mounted while either the camera or the library is visible.
+// Quick-action routing must not depend on creating a camera preview first.
+private final class CameraWindowSceneView: UIView {
+    var onSceneChange: ((UIWindowScene) -> Void)?
+    private weak var reportedScene: UIWindowScene?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        reportSceneIfNeeded()
+    }
+
+    func reportSceneIfNeeded() {
+        guard let scene = window?.windowScene, reportedScene !== scene else { return }
+        reportedScene = scene
+        // Defer SwiftUI state changes until the UIKit view update has finished.
+        DispatchQueue.main.async { [weak self, weak scene] in
+            guard let scene, self?.window?.windowScene === scene else { return }
+            self?.onSceneChange?(scene)
+        }
+    }
+}
+
+struct CameraWindowSceneReader: UIViewRepresentable {
+    let onSceneChange: (UIWindowScene) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = CameraWindowSceneView()
+        view.isUserInteractionEnabled = false
+        view.onSceneChange = onSceneChange
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        guard let view = uiView as? CameraWindowSceneView else { return }
+        view.onSceneChange = onSceneChange
+        view.reportSceneIfNeeded()
     }
 }
 

@@ -36,15 +36,26 @@ struct ContentView: View {
     @State private var cameraWindowScene: UIWindowScene?
 
     var body: some View {
-        cameraPage
-        .fullScreenCover(isPresented: $showLibrary, onDismiss: {
-            libraryQuickAction = nil
-            updateSceneOrientation(libraryPresented: false)
-        }) {
-            NavigationStack {
-                LibraryView(store: store, quickAction: libraryQuickAction) { showLibrary = false }
+        Group {
+            if showLibrary {
+                NavigationStack {
+                    LibraryView(store: store, quickAction: libraryQuickAction) { showLibrary = false }
+                }
+                .onAppear { updateSceneOrientation(libraryPresented: true) }
+            } else if cameraWindowScene != nil {
+                cameraPage
+            } else {
+                // Resolve the scene and its launch action before creating the camera page.
+                Color(uiColor: .systemBackground).ignoresSafeArea()
             }
-            .onAppear { updateSceneOrientation(libraryPresented: true) }
+        }
+        .background {
+            CameraWindowSceneReader { scene in
+                cameraWindowScene = scene
+                openPendingQuickAction()
+                updateSceneOrientation(libraryPresented: showLibrary)
+            }
+            .frame(width: 0, height: 0)
         }
         .alert("Error", isPresented: Binding(
             get: { errorMessage != nil || camera.errorMessage != nil },
@@ -68,8 +79,9 @@ struct ContentView: View {
                 showCameraControls = false
                 activeControl = nil
                 camera.stop()
-            } else if scenePhase == .active {
-                Task { await camera.start() }
+            } else {
+                libraryQuickAction = nil
+                // The camera page's task restarts capture when it is inserted again.
             }
         }
         .onChange(of: camera.mode) { _, newMode in
@@ -87,7 +99,7 @@ struct ContentView: View {
             } else if newPhase == .active {
                 openPendingQuickAction()
                 updateSceneOrientation(libraryPresented: showLibrary)
-                if !showLibrary {
+                if !showLibrary, cameraWindowScene != nil {
                     Task { await camera.start() }
                 }
             }
@@ -95,8 +107,7 @@ struct ContentView: View {
     }
 
     private func openPendingQuickAction() {
-        guard scenePhase == .active,
-              let scene = cameraWindowScene,
+        guard let scene = cameraWindowScene,
               let request = quickActionRouter.takeRequest(for: scene.session) else { return }
         libraryQuickAction = request
         cancelCountdown()
@@ -1020,6 +1031,12 @@ private struct LibraryView: View {
         self.quickAction = quickAction
         self.close = close
         self._searchIndex = ObservedObject(wrappedValue: store.searchIndex)
+        let initialTab: Tab = switch quickAction?.action {
+        case .collections: .collections
+        case .templates: .templates
+        default: .library
+        }
+        self._tab = State(initialValue: initialTab)
     }
     @State private var tab: Tab = .library
     @State private var appliedQuickActionID: UUID?
