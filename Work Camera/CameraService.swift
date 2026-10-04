@@ -244,6 +244,7 @@ final class CameraService: NSObject, ObservableObject {
     private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var isConfigured = false
     private var wantsRunning = false
+    private var sessionLifecycleSubscriptions: [AnyCancellable] = []
     private var shouldResetZoomOnStart = true
     private var autoMacroTask: Task<Void, Never>?
     private var autoMacroUsesUltraWide = false
@@ -274,10 +275,74 @@ final class CameraService: NSObject, ObservableObject {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        observeSessionLifecycle()
     }
 
     deinit {
         autoMacroTask?.cancel()
+    }
+
+    private func observeSessionLifecycle() {
+        let center = NotificationCenter.default
+        sessionLifecycleSubscriptions.append(
+            center.publisher(for: AVCaptureSession.wasInterruptedNotification, object: session)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.isReady = false
+                        self.stopAutoMacroMonitoring()
+                        if self.errorMessage == "Could not start the camera." {
+                            self.errorMessage = nil
+                        }
+                    }
+                }
+        )
+        sessionLifecycleSubscriptions.append(
+            center.publisher(for: AVCaptureSession.interruptionEndedNotification, object: session)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        guard self.wantsRunning,
+                              UIApplication.shared.applicationState == .active else { return }
+                        if self.session.isRunning {
+                            self.updateSessionReadiness()
+                        } else if !self.isRecording {
+                            await self.start()
+                        }
+                    }
+                }
+        )
+        sessionLifecycleSubscriptions.append(
+            center.publisher(for: AVCaptureSession.didStartRunningNotification, object: session)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.updateSessionReadiness() }
+                }
+        )
+        sessionLifecycleSubscriptions.append(
+            center.publisher(for: AVCaptureSession.runtimeErrorNotification, object: session)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        self?.isReady = false
+                        self?.stopAutoMacroMonitoring()
+                    }
+                }
+        )
+    }
+
+    private func updateSessionReadiness() {
+        let wasReady = isReady
+        isReady = wantsRunning && session.isRunning && !session.isInterrupted &&
+            UIApplication.shared.applicationState == .active
+        guard isReady else { return }
+        if errorMessage == "Could not start the camera." { errorMessage = nil }
+        if !wasReady, let device = videoInput?.device {
+            applyCameraControls(to: device, enabled: true)
+            startAutoMacroMonitoring()
+        }
     }
 
     private func updateLocationTracking() {
@@ -312,6 +377,7 @@ final class CameraService: NSObject, ObservableObject {
         }
         let audioAllowed = await requestPermission(for: .audio)
         guard wantsRunning else { return }
+        guard UIApplication.shared.applicationState == .active else { return }
         isAuthorized = true
         updateLocationTracking()
         if !isConfigured {
@@ -330,12 +396,9 @@ final class CameraService: NSObject, ObservableObject {
         sessionQueue.async {
             if !captureSession.isRunning { captureSession.startRunning() }
             Task { @MainActor in
-                self.isReady = self.wantsRunning && captureSession.isRunning
-                if self.isReady, let device = self.videoInput?.device {
-                    self.applyCameraControls(to: device, enabled: true)
-                    self.startAutoMacroMonitoring()
-                }
-                if self.wantsRunning && !captureSession.isRunning {
+                self.updateSessionReadiness()
+                if self.wantsRunning && !captureSession.isRunning &&
+                    !captureSession.isInterrupted && UIApplication.shared.applicationState == .active {
                     self.errorMessage = "Could not start the camera."
                 }
             }

@@ -23,6 +23,8 @@ struct ContentView: View {
     @ObservedObject private var quickActionRouter = CameraQuickActionRouter.shared
     @State private var libraryQuickAction: CameraQuickActionRequest?
     @State private var showLibrary = false
+    @State private var libraryFlowActive = false
+    @State private var cameraPageWasShown = false
     @State private var showGrid = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
     @State private var showCameraControls = false
@@ -34,31 +36,50 @@ struct ContentView: View {
     @State private var errorMessage: String?
     @State private var deviceOrientation: UIDeviceOrientation = .portrait
     @State private var cameraWindowScene: UIWindowScene?
+    @State private var portraitCameraInsets: UIEdgeInsets?
+    @State private var portraitCameraSize: CGSize?
 
     var body: some View {
         Group {
-            if showLibrary {
-                NavigationStack {
-                    LibraryView(store: store, quickAction: libraryQuickAction) { showLibrary = false }
-                }
-                .onAppear { updateSceneOrientation(libraryPresented: true) }
-            } else if cameraWindowScene != nil {
-                cameraPage
+            if let size = portraitCameraSize, !libraryFlowActive || cameraPageWasShown {
+                cameraPage(size: size)
             } else {
                 // Resolve the scene and its launch action before creating the camera page.
                 Color(uiColor: .systemBackground).ignoresSafeArea()
             }
         }
         .background {
-            CameraWindowSceneReader { scene in
-                cameraWindowScene = scene
-                openPendingQuickAction()
-                updateSceneOrientation(libraryPresented: showLibrary)
+            ZStack {
+                CameraWindowSceneReader { scene in
+                    updateCameraScene(scene)
+                    openPendingQuickAction()
+                }
+                LibraryPresentation(
+                    isPresented: showLibrary,
+                    initialOrientation: libraryInitialOrientation,
+                    content: NavigationStack {
+                        LibraryView(store: store, quickAction: libraryQuickAction) { showLibrary = false }
+                    }
+                    .alert("Error", isPresented: Binding(
+                        get: { libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
+                        set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
+                    )) {
+                        Button("OK") { errorMessage = nil; camera.errorMessage = nil }
+                    } message: {
+                        Text(errorMessage ?? camera.errorMessage ?? "Unknown error")
+                    },
+                    onDidDismiss: libraryDidDismiss,
+                    onError: libraryPresentationFailed,
+                    onDismissCancelled: { message in
+                        showLibrary = true
+                        errorMessage = message
+                    }
+                )
             }
             .frame(width: 0, height: 0)
         }
         .alert("Error", isPresented: Binding(
-            get: { errorMessage != nil || camera.errorMessage != nil },
+            get: { !libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
             set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
         )) {
             Button("OK") {
@@ -73,15 +94,11 @@ struct ContentView: View {
             catch { errorMessage = error.localizedDescription }
         }
         .onChange(of: showLibrary) { _, isPresented in
-            updateSceneOrientation(libraryPresented: isPresented)
             if isPresented {
                 cancelCountdown()
                 showCameraControls = false
                 activeControl = nil
                 camera.stop()
-            } else {
-                libraryQuickAction = nil
-                // The camera page's task restarts capture when it is inserted again.
             }
         }
         .onChange(of: camera.mode) { _, newMode in
@@ -98,8 +115,7 @@ struct ContentView: View {
                 camera.resetZoomOnNextStart()
             } else if newPhase == .active {
                 openPendingQuickAction()
-                updateSceneOrientation(libraryPresented: showLibrary)
-                if !showLibrary, cameraWindowScene != nil {
+                if !libraryFlowActive, cameraPageWasShown {
                     Task { await camera.start() }
                 }
             }
@@ -114,13 +130,56 @@ struct ContentView: View {
         showCameraControls = false
         activeControl = nil
         camera.stop()
+        if !showLibrary { openLibrary() }
+    }
+
+    private func openLibrary() {
+        libraryFlowActive = true
         showLibrary = true
     }
 
-    private func updateSceneOrientation(libraryPresented: Bool) {
-        guard let scene = cameraWindowScene else { return }
-        CameraOrientationPolicy.setLibraryPresented(libraryPresented, in: scene) { error in
-            errorMessage = "Could not update the screen orientation: \(error.localizedDescription)"
+    private var libraryInitialOrientation: UIInterfaceOrientation {
+        let current = UIDevice.current.orientation
+        let orientation = current.isValidInterfaceOrientation ? current : deviceOrientation
+        switch orientation {
+        case .landscapeLeft: return .landscapeRight
+        case .landscapeRight: return .landscapeLeft
+        default: return .portrait
+        }
+    }
+
+    private func libraryDidDismiss() {
+        showLibrary = false
+        libraryFlowActive = false
+        libraryQuickAction = nil
+        // A retained camera page does not rerun its task after a modal closes.
+        // Cold quick-action launches instead create it now and use that task.
+        if cameraPageWasShown, scenePhase == .active {
+            Task { await camera.start() }
+        }
+    }
+
+    private func libraryPresentationFailed(_ message: String) {
+        libraryDidDismiss()
+        errorMessage = message
+    }
+
+    private func updateCameraScene(_ scene: UIWindowScene) {
+        cameraWindowScene = scene
+        let orientation = scene.effectiveGeometry.interfaceOrientation
+        // Capture one portrait layout for the camera. Both
+        // SwiftUI content and its UIKit canvas keep these dimensions thereafter.
+        if portraitCameraSize == nil, orientation == .portrait,
+           let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first {
+            window.layoutIfNeeded()
+            let insets = window.safeAreaInsets
+            let size = window.bounds.size
+            // A newly attached window can report zero before its first layout.
+            if insets != .zero, size.width > 0, size.height > 0 {
+                portraitCameraInsets = insets
+                portraitCameraSize = CGSize(width: min(size.width, size.height),
+                                            height: max(size.width, size.height))
+            }
         }
     }
 
@@ -134,112 +193,14 @@ struct ContentView: View {
         }
     }
 
-    private var cameraPage: some View {
-        // Read the system insets outside the content that extends under the safe area.
-        GeometryReader { safeGeometry in
-            GeometryReader { geometry in
-                let deviceWidth = geometry.size.width
-                let deviceHeight = geometry.size.height
-                let cameraEdgeInset = safeGeometry.safeAreaInsets.top
-                let isVideo = camera.mode == .video
-                let previewRatio: CGFloat = camera.mode == .photo ? 4 / 3 : 16 / 9
-                let topHeight = isVideo ? cameraEdgeInset : max(max(80, cameraEdgeInset + 52),
-                    (deviceHeight - deviceWidth * previewRatio) * 0.33)
-                let bottomHeight = isVideo ? 76 + safeGeometry.safeAreaInsets.bottom : 188
-                let previewHeight = min(deviceWidth * previewRatio, max(0, deviceHeight - topHeight - bottomHeight))
-                let previewWidth = isVideo ? deviceWidth : previewHeight / previewRatio
-
-                ZStack {
-                    // The sensor and the fixed portrait preview rotate with the handset.
-                    cameraPreview()
-                        .frame(width: previewWidth, height: previewHeight)
-                        .clipped()
-                        .position(x: deviceWidth / 2, y: topHeight + previewHeight / 2)
-
-                    // Scene orientation is locked while this camera page is visible.
-                    VStack(spacing: 0) {
-                        if isVideo {
-                            Color.black.frame(height: topHeight)
-                        } else {
-                            topControls()
-                                .padding(.top, cameraEdgeInset)
-                                .frame(height: topHeight)
-                                .background(.black)
-                        }
-
-                        ZStack(alignment: .bottom) {
-                            Color.clear.allowsHitTesting(false)
-                            if isVideo {
-                                VStack {
-                                    Text("HEVC")
-                                        .font(.system(size: 13, weight: .medium))
-                                        .foregroundStyle(.white)
-                                        .rotationEffect(controlLabelAngle)
-                                        .shadow(color: .black.opacity(0.6), radius: 2)
-                                        .padding(.top, 12)
-                                        .accessibilityLabel("HEVC video")
-                                        .opacity(camera.isRecording ? 0 : 1)
-                                    Spacer(minLength: 0)
-                                    if camera.isAuthorized {
-                                        zoomControls()
-                                            .padding(.bottom, 124)
-                                    }
-                                }
-                            } else if camera.isAuthorized {
-                                zoomControls()
-                                    .padding(.bottom, 12)
-                            }
-                        }
-                        .frame(height: previewHeight)
-
-                        Color.black
-                            .frame(maxHeight: .infinity)
-                    }
-                    .frame(width: deviceWidth, height: deviceHeight)
-                    .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
-
-                    bottomControls(bottomSafeAreaInset: safeGeometry.safeAreaInsets.bottom)
-                        .frame(width: deviceWidth)
-                        .frame(height: deviceHeight, alignment: .bottom)
-
-                    if isVideo && camera.isRecording {
-                        recordingTimeBadge
-                            .rotationEffect(controlLabelAngle)
-                            .position(recordingTimePosition(
-                                width: previewWidth,
-                                height: previewHeight,
-                                top: topHeight
-                            ))
-                            .allowsHitTesting(false)
-                    }
-
-                    if showCameraControls || activeControl != nil {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .ignoresSafeArea()
-                            .onTapGesture {
-                                showCameraControls = false
-                                activeControl = nil
-                            }
-                        Group {
-                            if let activeControl {
-                                controlPanel(for: activeControl)
-                            } else {
-                                cameraControlsPanel
-                            }
-                        }
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                            .padding(.horizontal, activeControl == nil ? 16 : 8)
-                            .padding(.bottom, activeControl == nil ? 16 : 8)
-                    }
-                }
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .background(.black)
-            }
-            .ignoresSafeArea()
-        }
-        .background(Color.black.ignoresSafeArea())
+    private func cameraPage(size: CGSize) -> some View {
+        FixedPortraitCameraCanvas(
+            portraitSize: size,
+            content: cameraCanvas(size: size)
+        )
+        .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
+        .onAppear { cameraPageWasShown = true }
         .task {
             camera.onPhoto = { data in
                 do { try store.savePhoto(data) }
@@ -252,10 +213,114 @@ struct ContentView: View {
                     errorMessage = error.localizedDescription
                 }
             }
-            if scenePhase == .active, !showLibrary {
+            if scenePhase == .active, !libraryFlowActive {
                 await camera.start()
             }
         }
+    }
+
+    private func cameraCanvas(size: CGSize) -> some View {
+        let deviceWidth = size.width
+        let deviceHeight = size.height
+        let cameraEdgeInset = portraitCameraInsets?.top ?? 0
+        let bottomSafeAreaInset = portraitCameraInsets?.bottom ?? 0
+        let isVideo = camera.mode == .video
+        let previewRatio: CGFloat = camera.mode == .photo ? 4 / 3 : 16 / 9
+        let topHeight = isVideo ? cameraEdgeInset : max(max(80, cameraEdgeInset + 52),
+            (deviceHeight - deviceWidth * previewRatio) * 0.33)
+        let bottomHeight = isVideo ? 76 + bottomSafeAreaInset : 188
+        let previewHeight = min(deviceWidth * previewRatio, max(0, deviceHeight - topHeight - bottomHeight))
+        let previewWidth = isVideo ? deviceWidth : previewHeight / previewRatio
+
+        return ZStack {
+            // The sensor and the fixed portrait preview rotate with the handset.
+            cameraPreview()
+                .frame(width: previewWidth, height: previewHeight)
+                .clipped()
+                .position(x: deviceWidth / 2, y: topHeight + previewHeight / 2)
+
+            // Controls retain their original portrait device coordinates.
+            VStack(spacing: 0) {
+                if isVideo {
+                    Color.black.frame(height: topHeight)
+                } else {
+                    topControls()
+                        .padding(.top, cameraEdgeInset)
+                        .frame(height: topHeight)
+                        .background(.black)
+                }
+
+                ZStack(alignment: .bottom) {
+                    Color.clear.allowsHitTesting(false)
+                    if isVideo {
+                        VStack {
+                            Text("HEVC")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(.white)
+                                .rotationEffect(controlLabelAngle)
+                                .shadow(color: .black.opacity(0.6), radius: 2)
+                                .padding(.top, 12)
+                                .accessibilityLabel("HEVC video")
+                                .opacity(camera.isRecording ? 0 : 1)
+                            Spacer(minLength: 0)
+                            if camera.isAuthorized {
+                                zoomControls()
+                                    .padding(.bottom, 124)
+                            }
+                        }
+                    } else if camera.isAuthorized {
+                        zoomControls()
+                            .padding(.bottom, 12)
+                    }
+                }
+                .frame(height: previewHeight)
+
+                Color.black
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(width: deviceWidth, height: deviceHeight)
+            .position(x: deviceWidth / 2, y: deviceHeight / 2)
+
+            bottomControls(bottomSafeAreaInset: bottomSafeAreaInset)
+                .frame(width: deviceWidth)
+                .frame(height: deviceHeight, alignment: .bottom)
+
+            if isVideo && camera.isRecording {
+                recordingTimeBadge
+                    .rotationEffect(controlLabelAngle)
+                    .position(recordingTimePosition(
+                        width: previewWidth,
+                        height: previewHeight,
+                        top: topHeight
+                    ))
+                    .allowsHitTesting(false)
+            }
+
+            if showCameraControls || activeControl != nil {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showCameraControls = false
+                        activeControl = nil
+                    }
+                Group {
+                    if let activeControl {
+                        controlPanel(for: activeControl)
+                    } else {
+                        cameraControlsPanel
+                    }
+                }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.horizontal, activeControl == nil ? 16 : 8)
+                    .padding(.bottom, activeControl == nil ? 16 : 8)
+            }
+        }
+        .frame(width: deviceWidth, height: deviceHeight)
+        .background(.black)
+        .ignoresSafeArea()
+        .environment(\.colorScheme, .dark)
+        .transaction { $0.animation = nil }
     }
 
     private var recordingTimeBadge: some View {
@@ -296,12 +361,13 @@ struct ContentView: View {
                 session: camera.session,
                 device: camera.previewDevice,
                 onDeviceOrientationChange: { orientation in
-                    if deviceOrientation != orientation { deviceOrientation = orientation }
+                    if deviceOrientation != orientation {
+                        deviceOrientation = orientation
+                    }
                 },
                 onWindowSceneChange: { scene in
-                    cameraWindowScene = scene
+                    updateCameraScene(scene)
                     openPendingQuickAction()
-                    updateSceneOrientation(libraryPresented: showLibrary)
                 }
             )
             .gesture(
@@ -517,7 +583,7 @@ struct ContentView: View {
     }
 
     private var libraryButton: some View {
-        Button { showLibrary = true } label: {
+        Button { openLibrary() } label: {
             ZStack {
                 Circle().fill(.white.opacity(0.12))
                 if let item = store.items.first {
@@ -1045,6 +1111,8 @@ private struct LibraryView: View {
     @State private var selectedIDs: Set<String> = []
     @State private var searchText = ""
     @State private var detailItem: MediaItem?
+    @State private var isGridPrepared = false
+    @State private var preparedGridThumbnails: [MediaItem: MediaThumbnailCache.Entry] = [:]
     @State private var showDeleteConfirmation = false
     @State private var deleteErrorMessage: String?
 
@@ -1151,7 +1219,7 @@ private struct LibraryView: View {
                 MediaDetailView(
                     store: store,
                     item: item,
-                    photoIDs: displayedItems.filter { $0.kind == .photo }.map(\.id)
+                    mediaIDs: displayedItems.map(\.id)
                 )
             }
             .preferredColorScheme(nil)
@@ -1401,48 +1469,87 @@ private struct LibraryView: View {
     }
 
     private var grid: some View {
-        ScrollView {
-            if displayedItems.isEmpty {
-                ContentUnavailableView(
-                    albumScope != nil ? "No Items in This Album" : store.items.isEmpty ? "No captures yet" : "No matching items",
-                    systemImage: "photo.on.rectangle",
-                    description: Text(albumScope != nil
-                                      ? "Select photos or videos in Library to add them to an album, or check the current filter."
-                                      : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
-                )
-                .padding(.top, 60)
-            } else {
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
-                    spacing: 2
-                ) {
-                    ForEach(displayedItems) { item in
-                        Button {
-                            if isSelecting {
-                                if !selectedIDs.insert(item.id).inserted {
-                                    selectedIDs.remove(item.id)
+        GeometryReader { viewport in
+            let items = displayedItems
+            let tileWidth = max(1, (viewport.size.width - 8) / 5)
+            let visibleRows = max(1, Int(ceil(viewport.size.height / (tileWidth + 2))))
+            let initialItems = Array(items.prefix((visibleRows + 1) * 5))
+            let cachedThumbnails = Dictionary(uniqueKeysWithValues: initialItems.compactMap { item in
+                MediaThumbnailCache.shared.cached(for: item).map { (item, $0) }
+            })
+            let isPrepared = isGridPrepared || cachedThumbnails.count == initialItems.count
+
+            ScrollView {
+                if items.isEmpty {
+                    ContentUnavailableView(
+                        albumScope != nil ? "No Items in This Album" : store.items.isEmpty ? "No captures yet" : "No matching items",
+                        systemImage: "photo.on.rectangle",
+                        description: Text(albumScope != nil
+                                          ? "Select photos or videos in Library to add them to an album, or check the current filter."
+                                          : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
+                    )
+                    .padding(.top, 60)
+                } else if isPrepared {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
+                        spacing: 2
+                    ) {
+                        ForEach(items) { item in
+                            Button {
+                                if isSelecting {
+                                    if !selectedIDs.insert(item.id).inserted {
+                                        selectedIDs.remove(item.id)
+                                    }
+                                } else {
+                                    detailItem = item
                                 }
-                            } else {
-                                detailItem = item
+                            } label: {
+                                tile(for: item, preparedThumbnail: preparedGridThumbnails[item] ?? cachedThumbnails[item])
                             }
-                        } label: {
-                            tile(for: item)
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(item.filename)
+                            .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(item.filename)
-                        .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
+                    }
+                } else {
+                    // Show the grid structure immediately while a missing first batch is prepared.
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
+                        spacing: 2
+                    ) {
+                        ForEach(0..<initialItems.count, id: \.self) { _ in
+                            Color.secondary.opacity(0.2)
+                                .aspectRatio(1, contentMode: .fit)
+                                .accessibilityHidden(true)
+                        }
                     }
                 }
             }
+            .scrollIndicators(.hidden)
+            .background(Color(uiColor: .systemBackground))
+            .foregroundStyle(.primary)
+            .task(id: initialItems) {
+                guard !isGridPrepared else { return }
+                let thumbnails: [MediaItem: MediaThumbnailCache.Entry]
+                if cachedThumbnails.count == initialItems.count {
+                    thumbnails = cachedThumbnails
+                } else {
+                    thumbnails = await MediaThumbnailCache.shared.loadBatch(initialItems)
+                }
+                guard !Task.isCancelled else { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    preparedGridThumbnails = thumbnails
+                    isGridPrepared = true
+                }
+            }
         }
-        .scrollIndicators(.hidden)
-        .background(Color(uiColor: .systemBackground))
-        .foregroundStyle(.primary)
     }
 
-    private func tile(for item: MediaItem) -> some View {
+    private func tile(for item: MediaItem, preparedThumbnail: MediaThumbnailCache.Entry?) -> some View {
         GeometryReader { geometry in
-            MediaThumbnail(item: item)
+            MediaThumbnail(item: item, preparedThumbnail: preparedThumbnail)
                 .frame(width: geometry.size.width, height: geometry.size.height)
                 .clipped()
                 .overlay(alignment: .bottomTrailing) {
@@ -1881,7 +1988,7 @@ private struct ReportTemplateEditor: View {
 private struct MediaDetailView: View {
     @ObservedObject var store: MediaStore
     @State private var item: MediaItem
-    let photoIDs: [String]
+    let mediaIDs: [String]
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dismiss) private var dismiss
     @State private var photoImage: UIImage?
@@ -1927,10 +2034,10 @@ private struct MediaDetailView: View {
     @State private var shareSaveError: String?
     @State private var errorMessage: String?
 
-    init(store: MediaStore, item: MediaItem, photoIDs: [String]) {
+    init(store: MediaStore, item: MediaItem, mediaIDs: [String]) {
         self.store = store
         _item = State(initialValue: item)
-        self.photoIDs = photoIDs
+        self.mediaIDs = mediaIDs
     }
 
     private var isDark: Bool { item.kind == .video || colorScheme == .dark }
@@ -2078,15 +2185,20 @@ private struct MediaDetailView: View {
     private var media: some View {
         if let photoImage, item.kind == .photo {
             ZoomablePhotoSurface(image: photoImage) { direction in
-                selectAdjacentPhoto(offset: direction == .left ? 1 : -1)
+                selectAdjacentMedia(offset: direction == .left ? 1 : -1)
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel(item.filename)
-                .accessibilityAction(named: "Previous Photo") { selectAdjacentPhoto(offset: -1) }
-                .accessibilityAction(named: "Next Photo") { selectAdjacentPhoto(offset: 1) }
+                .accessibilityAction(named: "Previous Media") { selectAdjacentMedia(offset: -1) }
+                .accessibilityAction(named: "Next Media") { selectAdjacentMedia(offset: 1) }
         } else if let player, item.kind == .video {
-            VideoPlaybackSurface(player: player)
+            VideoPlaybackSurface(player: player) { direction in
+                selectAdjacentMedia(offset: direction == .left ? 1 : -1)
+            }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel(item.filename)
+                .accessibilityAction(named: "Previous Media") { selectAdjacentMedia(offset: -1) }
+                .accessibilityAction(named: "Next Media") { selectAdjacentMedia(offset: 1) }
         } else {
             ContentUnavailableView("Unable to open media", systemImage: "exclamationmark.triangle")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3356,24 +3468,39 @@ private struct MediaDetailView: View {
         return [MetadataEntry(id: path, value: String(describing: value))]
     }
 
-    private func selectAdjacentPhoto(offset: Int) {
-        let photos = photoIDs.compactMap { id in
-            store.items.first { $0.id == id && $0.kind == .photo }
+    private func selectAdjacentMedia(offset: Int) {
+        let mediaItems = mediaIDs.compactMap { id in
+            store.items.first { $0.id == id }
         }
-        guard item.kind == .photo,
-              let index = photos.firstIndex(where: { $0.id == item.id }),
-              photos.indices.contains(index + offset) else { return }
+        guard let index = mediaItems.firstIndex(where: { $0.id == item.id }),
+              mediaItems.indices.contains(index + offset) else { return }
         addressRequest?.cancel()
         addressRequest = nil
         locationTitle = nil
         locationAddress = nil
         isResolvingAddress = false
-        item = photos[index + offset]
+        videoInfo = VideoInfoSummary()
+        videoThumbnail = nil
+        videoCaption = ""
+        videoKeywords = ""
+        savedVideoCaption = ""
+        savedVideoKeywords = ""
+        infoSaveError = nil
+        item = mediaItems[index + offset]
         loadSelection()
         loadPhotoMetadata()
     }
 
     private func loadSelection() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        playbackTime = 0
+        playbackDuration = 0
+        isPlaying = false
+        isSeeking = false
+        resumeAfterSeeking = false
+        videoControlsVisible = true
+        videoControlsHideAt = nil
         report = store.report(for: item)
         photoImage = item.kind == .photo ? UIImage(contentsOfFile: item.url.path) : nil
         player = item.kind == .video ? AVPlayer(url: item.url) : nil
@@ -3381,6 +3508,7 @@ private struct MediaDetailView: View {
             player.isMuted = isMuted
             player.play()
             isPlaying = true
+            restartVideoControlsTimeout()
         }
     }
 
@@ -3588,27 +3716,47 @@ private final class ZoomablePhotoView: UIView, UIScrollViewDelegate, UIGestureRe
 // Render only the video; playback controls belong to the floating SwiftUI bar.
 private struct VideoPlaybackSurface: UIViewRepresentable {
     let player: AVPlayer
+    let onSwipe: (UISwipeGestureRecognizer.Direction) -> Void
 
     func makeUIView(context: Context) -> VideoPlaybackView {
         let view = VideoPlaybackView()
         view.backgroundColor = .black
         view.playerLayer.videoGravity = .resizeAspect
         view.playerLayer.player = player
+        view.onSwipe = onSwipe
         return view
     }
 
     func updateUIView(_ view: VideoPlaybackView, context: Context) {
         view.playerLayer.player = player
+        view.onSwipe = onSwipe
     }
 
     static func dismantleUIView(_ view: VideoPlaybackView, coordinator: ()) {
         view.playerLayer.player = nil
+        view.onSwipe = nil
     }
 }
 
 private final class VideoPlaybackView: UIView {
     override class var layerClass: AnyClass { AVPlayerLayer.self }
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    var onSwipe: ((UISwipeGestureRecognizer.Direction) -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        for direction: UISwipeGestureRecognizer.Direction in [.left, .right] {
+            let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
+            swipe.direction = direction
+            addGestureRecognizer(swipe)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {
+        onSwipe?(gesture.direction)
+    }
 }
 
 private struct VideoDurationBadge: View {
@@ -3645,42 +3793,35 @@ private struct VideoDurationBadge: View {
 
 private struct MediaThumbnail: View {
     let item: MediaItem
-    @State private var thumbnailImage: UIImage?
+    let preparedThumbnail: MediaThumbnailCache.Entry?
+    @State private var loadedThumbnail: MediaThumbnailCache.Entry?
+
+    init(item: MediaItem, preparedThumbnail: MediaThumbnailCache.Entry? = nil) {
+        self.item = item
+        self.preparedThumbnail = preparedThumbnail
+    }
+
+    private var thumbnail: MediaThumbnailCache.Entry? {
+        if let preparedThumbnail, preparedThumbnail.item == item { return preparedThumbnail }
+        if let loadedThumbnail, loadedThumbnail.item == item { return loadedThumbnail }
+        return MediaThumbnailCache.shared.cached(for: item)
+    }
 
     var body: some View {
         ZStack {
             Color.secondary.opacity(0.2)
-            if let thumbnailImage {
-                Image(uiImage: thumbnailImage).resizable().scaledToFill()
+            if let image = thumbnail?.image {
+                Image(uiImage: image).resizable().scaledToFill()
             } else {
                 Image(systemName: item.kind == .video ? "video.fill" : "photo")
                     .font(.title2)
             }
         }
         .task(id: item) {
-            thumbnailImage = nil
-            if item.kind == .photo {
-                let url = item.url
-                let image = await Task.detached(priority: .utility) { () -> UIImage? in
-                    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-                    let options: [CFString: Any] = [
-                        kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceCreateThumbnailWithTransform: true,
-                        kCGImageSourceThumbnailMaxPixelSize: 256
-                    ]
-                    guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-                    else { return nil }
-                    return UIImage(cgImage: thumbnail)
-                }.value
-                if !Task.isCancelled { thumbnailImage = image }
-            } else {
-                let generator = AVAssetImageGenerator(asset: AVURLAsset(url: item.url))
-                generator.appliesPreferredTrackTransform = true
-                generator.maximumSize = CGSize(width: 256, height: 256)
-                if let result = try? await generator.image(at: .zero), !Task.isCancelled {
-                    thumbnailImage = UIImage(cgImage: result.image)
-                }
-            }
+            if let preparedThumbnail, preparedThumbnail.item == item { return }
+            let entry = await MediaThumbnailCache.shared.load(item)
+            guard !Task.isCancelled else { return }
+            loadedThumbnail = entry
         }
     }
 }

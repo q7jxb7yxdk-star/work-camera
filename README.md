@@ -2,7 +2,7 @@
 
 Work Camera is an iPhone app for recording work photos and videos, built with SwiftUI, UIKit, and AVFoundation. Photos, videos, and written reports are stored in the app's local media library before users organize, edit, or share them. No custom backend or account login is required.
 
-This document describes the repository source and settings, with camera, Home Screen quick-action, navigation, and privacy-manifest notes updated on 2026-10-02. See the [technical documentation](TECHNICAL_DOCUMENTATION.md) for implementation details and dated validation boundaries.
+This document describes the repository source and settings, with Library presentation, thumbnail caching, and build-number notes updated on 2026-10-04. Camera and privacy-manifest notes retain their dated evidence below. See the [technical documentation](TECHNICAL_DOCUMENTATION.md) for implementation details and dated validation boundaries.
 
 The camera description was updated on 2026-10-02 to reflect physical-camera-only capture with app-controlled Auto Macro.
 
@@ -15,7 +15,8 @@ The camera description was updated on 2026-10-02 to reflect physical-camera-only
 - **Implemented; hardware results Externally unverified**: MOV recording at 30 FPS. The code first tries 10-bit HLG BT.2020 at 4K or 1080p with HEVC, then falls back to 8-bit sRGB SDR, preferring 4K, 1080p, and 720p before other supported sizes. SDR uses HEVC when available, otherwise H.264. Configurations with neither a supported format nor codec show a recovery message. Actual codec, color metadata, Dolby Vision output, and lens compatibility require device verification.
 - **Implemented, optional**: Capture locations are saved when permission is granted and a valid, recent location is available. Shutter sound suppression, flash, torch, Auto Macro/ultra-wide close focusing, and resolution depend on device capabilities.
 - **Implemented**: A local Library, photo/video filters, album creation and renaming, album membership management, and individual or batch deletion. Photos support zooming and adjacent-photo navigation; videos have playback, progress, and mute controls.
-- **Implemented; final device behavior Externally unverified**: Home Screen quick actions open Library, Collections, or Templates. Launch routing resolves the window scene before creating the camera page and displays the requested page directly. The shortcut registration array is reversed to target the requested Library → Collections → Templates display order after the user reported the opposite order. The final display order and camera-flash fix still require device confirmation.
+- **Implemented; final device behavior Externally unverified**: Home Screen quick actions open Library, Collections, or Templates. Launch routing resolves the window scene before creating the camera page and requests the selected Library tab. A UIKit presentation bridge opens Library without animation, using the entry orientation; returning to Camera waits for portrait scene geometry before dismissal. The shortcut registration array is reversed to target the requested Library → Collections → Templates display order after the user reported the opposite order. The final display order and camera-flash fix still require device confirmation.
+- **Implemented; limited user-supplied device evidence**: Library prepares the initial viewport plus one row before revealing thumbnails together. The cache preloads the newest 40 items, uses an 80-entry `NSCache` count limit and a 32 MiB cost limit, and prepares remaining previews on disk. JPEG previews have a maximum edge of 256 pixels and do not change HEIC photos or HEVC/H.264 MOV originals. Limits are eviction guidance, not a hard cap on total app memory. Cold loads and rapid scrolling can still require disk reads or thumbnail generation; zero waiting is not guaranteed. The user reported that thumbnails no longer appeared one by one and supplied a later log without missing-preview-file errors; large-library scrolling remains unverified.
 - **Implemented**: Vision photo OCR, object classification, and document detection for search, with a local index cache and failure retry. Videos are searched by filename only. Recognition is not guaranteed to be complete or accurate.
 - **Implemented**: Per-item Reports, reusable templates, and video Captions/Keywords. Caption and Report share a text sidecar; Keywords are not included in the current search.
 - **Implemented**: Photo cropping, rotation, and PencilKit markup; video cropping, rotation, trimming, and audio removal. Both editors support overwriting or saving a new item.
@@ -39,7 +40,7 @@ Settings source: [project.pbxproj](Work%20Camera.xcodeproj/project.pbxproj).
 | SDK | `SDKROOT = auto`; no pinned SDK version |
 | Swift | `SWIFT_VERSION = 5.0` is the language mode, not the compiler version; default actor isolation is `MainActor` |
 | Xcode/macOS | No minimum versions declared; project metadata records creation tool `26.3` and `LastUpgradeCheck = 2700`, which do not establish minimum requirements or a successful build |
-| App version | Marketing `1.1.1`; build `20261001` |
+| App version | Marketing `1.1.1`; build `20261004` |
 | Dependencies | Apple/system frameworks only; no third-party package manifest or lockfile |
 
 Use an Xcode version that can open this project and provides an SDK compatible with the APIs used by the source. Physical capture, HEIC/HEVC, HLG, location, and Photos behavior require validation on an iPhone meeting the deployment target. There is no macOS or Mac Catalyst target. Project-level deployment values for other platforms do not mean the app supports those platforms.
@@ -74,11 +75,12 @@ After installation or an update, open the app once to register its dynamic Home 
 
 | Path | Responsibility |
 | --- | --- |
-| [Work Camera/](Work%20Camera/) | Seven Swift source files and `Assets.xcassets` |
-| [MyApp.swift](Work%20Camera/MyApp.swift) | App entry, scene delegates, quick-action registration/routing, window-scene reader, and orientation policy |
+| [Work Camera/](Work%20Camera/) | Eight Swift source files and `Assets.xcassets` |
+| [MyApp.swift](Work%20Camera/MyApp.swift) | App entry, scene delegates, quick-action registration/routing, window-scene reader, UIKit Library presentation, fixed portrait camera hosting, and orientation policy |
 | [ContentView.swift](Work%20Camera/ContentView.swift) | Camera UI, Library, media details, Reports/templates, metadata, sharing, and Photos activity |
 | [CameraService.swift](Work%20Camera/CameraService.swift) | Capture session, lenses, formats, permissions, location, and preview bridge |
 | [MediaStore.swift](Work%20Camera/MediaStore.swift) | Media, sidecars, albums, and filename allocation |
+| [MediaThumbnailCache.swift](Work%20Camera/MediaThumbnailCache.swift) | Memory cache, JPEG disk previews, preloading, and stale-preview cleanup |
 | [PhotoSearchIndex.swift](Work%20Camera/PhotoSearchIndex.swift) | Vision analysis, search, progress, and cache |
 | [PhotoEditorView.swift](Work%20Camera/PhotoEditorView.swift) / [VideoEditorView.swift](Work%20Camera/VideoEditorView.swift) | Editing previews, output generation, and save callbacks |
 | [Work Camera.xcodeproj/](Work%20Camera.xcodeproj/) | Project, embedded workspace, and user scheme management |

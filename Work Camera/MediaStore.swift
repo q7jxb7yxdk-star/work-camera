@@ -115,6 +115,7 @@ final class MediaStore: ObservableObject {
         }
         items.sort { $0.createdAt > $1.createdAt }
         searchIndex.reconcile(items: items)
+        MediaThumbnailCache.shared.reconcile(items: items)
         try loadAlbums()
     }
 
@@ -218,6 +219,7 @@ final class MediaStore: ObservableObject {
                 items[index].modifiedAt = Date()
             }
             searchIndex.reconcile(items: items)
+            MediaThumbnailCache.shared.reconcile(items: items)
         } else {
             try savePhoto(data)
         }
@@ -245,6 +247,7 @@ final class MediaStore: ObservableObject {
                                createdAt: values?.creationDate ?? captureDetails?.capturedAt ?? Date(),
                                modifiedAt: values?.contentModificationDate ?? Date()), at: 0)
         try? load()
+        MediaThumbnailCache.shared.reconcile(items: items)
     }
 
     func saveEditedVideo(from temporaryURL: URL, for item: MediaItem, overwrite: Bool) async throws {
@@ -290,6 +293,7 @@ final class MediaStore: ObservableObject {
             }
             items.insert(MediaItem(url: destination, kind: .video, createdAt: Date(), modifiedAt: Date()), at: 0)
         }
+        MediaThumbnailCache.shared.reconcile(items: items)
     }
 
     func videoCaptureDetails(for item: MediaItem) -> VideoCaptureDetails? {
@@ -361,6 +365,7 @@ final class MediaStore: ObservableObject {
         defer {
             items.removeAll { $0.id == item.id }
             searchIndex.reconcile(items: items)
+            MediaThumbnailCache.shared.reconcile(items: items)
         }
         var failures: [String] = []
         let key = memberKey(for: item)
