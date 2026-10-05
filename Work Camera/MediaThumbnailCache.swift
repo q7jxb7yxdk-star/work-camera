@@ -8,7 +8,7 @@ enum MediaThumbnailSize: Hashable, Sendable {
     case grid
     case collection(Int)
 
-    var pixelSize: Int {
+    nonisolated var pixelSize: Int {
         switch self {
         case .grid: 256
         case .collection(let pixels): pixels
