@@ -2068,7 +2068,6 @@ private struct MediaDetailView: View {
     @State private var showReplaceConfirmation = false
     @State private var showDeleteConfirmation = false
     @State private var sharePayload: SharePayload?
-    @State private var shareTemporaryPhotoURL: URL?
     @State private var shareSaveError: String?
     @State private var errorMessage: String?
 
@@ -2189,16 +2188,6 @@ private struct MediaDetailView: View {
             }
         }
         .sheet(item: $sharePayload, onDismiss: {
-            // SwiftUI may already have cleared sharePayload; retain the file separately
-            // until the share presentation has finished dismissing.
-            if let temporaryURL = shareTemporaryPhotoURL {
-                do {
-                    try FileManager.default.removeItem(at: temporaryURL)
-                } catch {
-                    errorMessage = "The temporary sharing photo could not be removed: \(error.localizedDescription)"
-                }
-                shareTemporaryPhotoURL = nil
-            }
             if let shareSaveError {
                 errorMessage = shareSaveError
                 self.shareSaveError = nil
@@ -3551,39 +3540,14 @@ private struct MediaDetailView: View {
     }
 
     private func share() {
-        guard sharePayload == nil, shareTemporaryPhotoURL == nil else { return }
+        guard sharePayload == nil else { return }
         guard saveReport() else { return }
-        var items: [Any]
-        if item.kind == .photo {
-            guard let image = photoImage ?? UIImage(contentsOfFile: item.url.path) else {
-                errorMessage = "The photo could not be loaded for sharing."
-                return
-            }
-            // Share the JPEG as a file URL; the receiving app controls caption handling.
-            // Preserve the source pixel dimensions. The original HEIC stays unchanged.
-            let size = image.size
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = image.scale
-            format.opaque = true
-            let renderer = UIGraphicsImageRenderer(size: size, format: format)
-            let jpeg = renderer.jpegData(withCompressionQuality: 1.0) { context in
-                UIColor.white.setFill()
-                context.fill(CGRect(origin: .zero, size: size))
-                image.draw(in: CGRect(origin: .zero, size: size))
-            }
-            let temporaryURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("WorkCamera-\(UUID().uuidString).jpg")
-            do {
-                try jpeg.write(to: temporaryURL, options: .atomic)
-            } catch {
-                errorMessage = "The photo could not be prepared for sharing: \(error.localizedDescription)"
-                return
-            }
-            shareTemporaryPhotoURL = temporaryURL
-            items = [temporaryURL]
-        } else {
-            items = [item.url]
+        guard FileManager.default.fileExists(atPath: item.url.path) else {
+            errorMessage = "The file could not be found for sharing."
+            return
         }
+        // Share the original media file; the receiving app controls caption handling.
+        var items: [Any] = [item.url]
         let reportText = MediaStore.normalizedReport(report)
         if !reportText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             items.append(reportText)
