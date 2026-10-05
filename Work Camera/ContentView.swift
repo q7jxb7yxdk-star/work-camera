@@ -1618,7 +1618,7 @@ private struct LibraryView: View {
             ZStack {
                 Color(uiColor: .tertiarySystemFill)
                 if let cover {
-                    MediaThumbnail(item: cover)
+                    CollectionThumbnail(item: cover, pointSize: geometry.size.width)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .clipped()
                 } else {
@@ -3825,6 +3825,49 @@ private struct VideoDurationBadge: View {
             durationText = seconds >= 3600 ?
                 String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60) :
                 String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        }
+    }
+}
+
+private struct CollectionThumbnail: View {
+    private struct Request: Hashable {
+        let item: MediaItem
+        let size: MediaThumbnailSize
+    }
+
+    let item: MediaItem
+    let pointSize: CGFloat
+    @Environment(\.displayScale) private var displayScale
+    @State private var loadedThumbnail: MediaThumbnailCache.Entry?
+
+    // Bucket nearby sizes to avoid new disk previews for every layout adjustment.
+    private var thumbnailSize: MediaThumbnailSize {
+        let pixels = min(2048, max(256, ceil(pointSize * displayScale / 128) * 128))
+        return .collection(Int(pixels))
+    }
+
+    private var thumbnail: MediaThumbnailCache.Entry? {
+        if let loadedThumbnail, loadedThumbnail.item == item, loadedThumbnail.size == thumbnailSize {
+            return loadedThumbnail
+        }
+        return MediaThumbnailCache.shared.cached(for: item, size: thumbnailSize)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.secondary.opacity(0.2)
+            if let image = thumbnail?.image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Image(systemName: item.kind == .video ? "video.fill" : "photo")
+                    .font(.title2)
+            }
+        }
+        .task(id: Request(item: item, size: thumbnailSize)) {
+            let size = thumbnailSize
+            let entry = await MediaThumbnailCache.shared.load(item, size: size)
+            guard !Task.isCancelled else { return }
+            loadedThumbnail = entry
         }
     }
 }
