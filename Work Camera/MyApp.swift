@@ -338,6 +338,14 @@ private final class LibraryPresentationController: UIViewController {
         scheduleProcessing()
     }
 
+    func requestDismissal() {
+        guard !isShuttingDown else { return }
+        // A full-screen UIKit host can hide the SwiftUI presenter. Handle Back
+        // directly instead of waiting for its representable to receive state.
+        wantsLibrary = false
+        scheduleProcessing()
+    }
+
     private func scheduleProcessing() {
         guard !isShuttingDown, !isProcessingScheduled else { return }
         isProcessingScheduled = true
@@ -541,7 +549,7 @@ private final class LibraryPresentationController: UIViewController {
 struct LibraryPresentation<Content: View>: UIViewControllerRepresentable {
     let isPresented: Bool
     let initialOrientation: UIInterfaceOrientation
-    let content: Content
+    let content: (@escaping () -> Void) -> Content
     let onDidDismiss: () -> Void
     let onError: (String) -> Void
     let onDismissCancelled: (String) -> Void
@@ -560,7 +568,10 @@ struct LibraryPresentation<Content: View>: UIViewControllerRepresentable {
         controller.onDidDismiss = onDidDismiss
         controller.onError = onError
         controller.onDismissCancelled = onDismissCancelled
-        controller.update(isPresented: isPresented, initialOrientation: initialOrientation, content: AnyView(content))
+        let hostedContent = content { [weak controller] in
+            controller?.requestDismissal()
+        }
+        controller.update(isPresented: isPresented, initialOrientation: initialOrientation, content: AnyView(hostedContent))
     }
 
     static func dismantleUIViewController(_ uiViewController: UIViewController, coordinator: Void) {

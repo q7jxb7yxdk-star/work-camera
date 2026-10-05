@@ -57,16 +57,21 @@ struct ContentView: View {
                 LibraryPresentation(
                     isPresented: showLibrary,
                     initialOrientation: libraryInitialOrientation,
-                    content: NavigationStack {
-                        LibraryView(store: store, quickAction: libraryQuickAction) { showLibrary = false }
-                    }
-                    .alert("Error", isPresented: Binding(
-                        get: { libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
-                        set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
-                    )) {
-                        Button("OK") { errorMessage = nil; camera.errorMessage = nil }
-                    } message: {
-                        Text(errorMessage ?? camera.errorMessage ?? "Unknown error")
+                    content: { requestDismissal in
+                        NavigationStack {
+                            LibraryView(store: store, quickAction: libraryQuickAction) {
+                                showLibrary = false
+                                requestDismissal()
+                            }
+                        }
+                        .alert("Error", isPresented: Binding(
+                            get: { libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
+                            set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
+                        )) {
+                            Button("OK") { errorMessage = nil; camera.errorMessage = nil }
+                        } message: {
+                            Text(errorMessage ?? camera.errorMessage ?? "Unknown error")
+                        }
                     },
                     onDidDismiss: libraryDidDismiss,
                     onError: libraryPresentationFailed,
