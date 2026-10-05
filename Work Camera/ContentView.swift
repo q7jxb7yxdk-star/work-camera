@@ -98,6 +98,12 @@ struct ContentView: View {
             do { try store.load() }
             catch { errorMessage = error.localizedDescription }
         }
+        .onChange(of: shouldKeepScreenAwake, initial: true) { _, keepAwake in
+            UIApplication.shared.isIdleTimerDisabled = keepAwake
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         .onChange(of: showLibrary) { _, isPresented in
             if isPresented {
                 cancelCountdown()
@@ -125,6 +131,10 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var shouldKeepScreenAwake: Bool {
+        scenePhase == .active && cameraPageWasShown && !libraryFlowActive
     }
 
     private func openPendingQuickAction() {
