@@ -1114,6 +1114,7 @@ private struct LibraryView: View {
     @State private var filter: Filter = .all
     @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
+    @State private var selectionSharePayload: LibrarySharePayload?
     @State private var searchText = ""
     @State private var detailItem: MediaItem?
     @State private var isGridPrepared = false
@@ -1210,6 +1211,9 @@ private struct LibraryView: View {
         .preferredColorScheme(nil)
         .onAppear { applyQuickAction() }
         .onChange(of: quickAction) { _, _ in applyQuickAction() }
+        .sheet(item: $selectionSharePayload) { payload in
+            LibraryShareSheet(urls: payload.urls)
+        }
         .sheet(item: $templateToEdit) { template in
             let isNew = !templates.contains { $0.id == template.id }
             ReportTemplateEditor(template: template, isNew: isNew) { name, content in
@@ -1668,9 +1672,28 @@ private struct LibraryView: View {
     private var bottomBar: some View {
         HStack(spacing: 0) {
             if isSelecting {
+                HStack(spacing: 0) {
+                    Button {
+                        shareSelectedItems()
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 22, weight: .regular))
+                            .frame(width: 48, height: 48)
+                            .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                            .overlay(Circle().strokeBorder(.gray.opacity(0.3), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Share selected captures")
+                    .disabled(selectedIDs.isEmpty)
+                    .opacity(selectedIDs.isEmpty ? 0.4 : 1)
+                    Spacer(minLength: 0)
+                }
+                .frame(width: 96)
                 Text("\(selectedIDs.count) Selected")
                     .font(.headline)
-                Spacer()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
                 Menu {
                     Button("Deselect All") { selectedIDs.removeAll() }
                     ForEach(store.albums) { album in
@@ -1733,6 +1756,16 @@ private struct LibraryView: View {
         .padding(.bottom, 8)
         .background(Color(uiColor: .systemBackground))
         .foregroundStyle(.primary)
+    }
+
+    private func shareSelectedItems() {
+        let urls = displayedItems.filter { selectedIDs.contains($0.id) }.map(\.url)
+        guard !urls.isEmpty else { return }
+        guard urls.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) else {
+            deleteErrorMessage = "Some selected files could not be found for sharing."
+            return
+        }
+        selectionSharePayload = LibrarySharePayload(urls: urls)
     }
 
     private var selectedItemNoun: String {
@@ -3829,6 +3862,21 @@ private struct MediaThumbnail: View {
             loadedThumbnail = entry
         }
     }
+}
+
+private struct LibrarySharePayload: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
+private struct LibraryShareSheet: UIViewControllerRepresentable {
+    let urls: [URL]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: urls, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 private struct SharePayload: Identifiable {
