@@ -2,7 +2,7 @@
 
 Work Camera is an iPhone app for recording work photos and videos, built with SwiftUI, UIKit, and AVFoundation. Photos, videos, and written reports are stored in the app's local media library before users organize, edit, or share them. No custom backend or account login is required.
 
-This document describes the repository source and settings, with camera auto-lock behavior, original-file detail sharing, Library selection sharing, Back-button handling, and Collections cover thumbnails updated on 2026-10-05 and Library presentation, grid thumbnail caching, and build-number notes updated on 2026-10-04. Camera and privacy-manifest notes retain their dated evidence below. See the [technical documentation](TECHNICAL_DOCUMENTATION.md) for implementation details and dated validation boundaries.
+This document describes the repository source and settings, with the optional photo date/time stamp and build-number notes updated on 2026-10-08, camera auto-lock behavior, original-file detail sharing, Library selection sharing, Back-button handling, and Collections cover thumbnails updated on 2026-10-05 and Library presentation, grid thumbnail caching, and build-number notes updated on 2026-10-04. Camera and privacy-manifest notes retain their dated evidence below. See the [technical documentation](TECHNICAL_DOCUMENTATION.md) for implementation details and dated validation boundaries.
 
 The camera description was updated on 2026-10-02 to reflect physical-camera-only capture with app-controlled Auto Macro.
 
@@ -11,6 +11,7 @@ The camera description was updated on 2026-10-02 to reflect physical-camera-only
 **Implemented** means the source is connected to the normal UI path. It does not mean compilation or device validation was completed in this task.
 
 - **Implemented**: HEIC photo capture, front/back camera switching, device-filtered zoom shortcuts, flash, exposure compensation, a grid, and 3/5/10-second capture timers. Preview, photos, and videos use physical camera inputs; virtual Triple/Dual cameras are used only to read lens/zoom metadata and are rejected as capture inputs.
+- **Implemented; device behavior externally unverified**: Photo-mode camera controls include a **DATE & TIME** option with On/Off choices. It defaults to Off and remembers the setting. When enabled, new photos receive a white date/time stamp with a dark shadow at the bottom right, scaled to the image dimensions. The local time is captured when the shutter requests the photo, after any countdown, in `yyyy-MM-dd HH:mm:ss` format. The stamp is written into the saved image and therefore appears in shared/exported copies; it is not a removable viewing overlay. Portrait/landscape placement, metadata retention, and device performance require manual validation.
 - **Implemented; device behavior externally unverified**: The screen stays awake only while the app is active and the camera capture screen is visible, in either Photo or Video mode. Entering Library or leaving the active state restores system auto-lock. This applies to the capture screen even when no photo or video is being recorded.
 - **Implemented; selected device scenarios manually verified**: Auto Macro defaults to on for supported back cameras and can be toggled with the macro button. The app uses stable autofocus-position readings to switch to the physical ultra-wide lens for close subjects. Startup keeps that input fixed through the 2-second cooldown and at least one second of stable focus samples, then establishes its exit baseline from the settled readings. Exit requires the same lens's focus position to reach `min(baseline + 0.04, 0.80)` for at least 1.25 seconds. Initial autofocus travel never triggers a normal-lens probe; that fallback has been removed. It preserves the requested zoom when the ultra-wide camera supports it, with dwell times and a cooldown to reduce repeated switching. Switching pauses during photo processing and recording; video preview can select a macro lens before recording starts. The 0.5× shortcut remains available. Focus thresholds require device calibration, especially in low light or low-detail scenes; they do not measure distance or reproduce Apple's virtual-camera Auto Macro. The `0.80` cap addresses a distant startup baseline observed after immediate withdrawal. It is an empirical value from the supplied device traces, applies across supported zooms and lighting conditions, and may cause unwanted exit if a close subject produces readings at or above it. Temporary Auto Macro diagnostic output has been removed.
 - **Implemented; hardware results Externally unverified**: MOV recording at 30 FPS. The code first tries 10-bit HLG BT.2020 at 4K or 1080p with HEVC, then falls back to 8-bit sRGB SDR, preferring 4K, 1080p, and 720p before other supported sizes. SDR uses HEVC when available, otherwise H.264. Configurations with neither a supported format nor codec show a recovery message. Actual codec, color metadata, Dolby Vision output, and lens compatibility require device verification.
@@ -43,7 +44,7 @@ Settings source: [project.pbxproj](Work%20Camera.xcodeproj/project.pbxproj).
 | SDK | `SDKROOT = auto`; no pinned SDK version |
 | Swift | `SWIFT_VERSION = 5.0` is the language mode, not the compiler version; default actor isolation is `MainActor` |
 | Xcode/macOS | No minimum versions declared; project metadata records creation tool `26.3` and `LastUpgradeCheck = 2700`, which do not establish minimum requirements or a successful build |
-| App version | Marketing `1.1.1`; build `20261004` |
+| App version | Marketing `1.1.1`; build `20261008` |
 | Dependencies | Apple/system frameworks only; no third-party package manifest or lockfile |
 
 Use an Xcode version that can open this project and provides an SDK compatible with the APIs used by the source. Physical capture, HEIC/HEVC, HLG, location, and Photos behavior require validation on an iPhone meeting the deployment target. There is no macOS or Mac Catalyst target. Project-level deployment values for other platforms do not mean the app supports those platforms.
@@ -78,10 +79,11 @@ After installation or an update, open the app once to register its dynamic Home 
 
 | Path | Responsibility |
 | --- | --- |
-| [Work Camera/](Work%20Camera/) | Eight Swift source files and `Assets.xcassets` |
+| [Work Camera/](Work%20Camera/) | Nine Swift source files and `Assets.xcassets` |
 | [MyApp.swift](Work%20Camera/MyApp.swift) | App entry, scene delegates, quick-action registration/routing, window-scene reader, UIKit Library presentation, fixed portrait camera hosting, and orientation policy |
 | [ContentView.swift](Work%20Camera/ContentView.swift) | Camera UI, Library, media details, Reports/templates, metadata, sharing, and Photos activity |
 | [CameraService.swift](Work%20Camera/CameraService.swift) | Capture session, lenses, formats, permissions, location, and preview bridge |
+| [PhotoDateTimeStamp.swift](Work%20Camera/PhotoDateTimeStamp.swift) | Local timestamp formatting, orientation normalization, image rendering, and HEIC encoding |
 | [MediaStore.swift](Work%20Camera/MediaStore.swift) | Media, sidecars, albums, and filename allocation |
 | [MediaThumbnailCache.swift](Work%20Camera/MediaThumbnailCache.swift) | Memory cache, JPEG disk previews, preloading, and stale-preview cleanup |
 | [PhotoSearchIndex.swift](Work%20Camera/PhotoSearchIndex.swift) | Vision analysis, search, progress, and cache |
@@ -103,6 +105,7 @@ Preserve existing uncommitted changes before development. The developer performs
 ## Known Limitations
 
 - Photos require HEIC; there is no JPEG capture fallback. Video prefers HLG/HEVC and falls back to SDR with HEVC or H.264; each lens must support a compatible 30 FPS configuration. Photos request the active format's maximum photo dimensions, without guaranteeing 48 MP.
+- Enabling DATE & TIME re-encodes the photo as HEIC at its full displayed pixel dimensions, baking in rotation/mirroring. EXIF, TIFF, GPS, and IPTC dictionaries are carried forward where available, with dimensions/orientation updated and MakerNote removed. The renderer uses standard dynamic range; HDR/gain maps and other capture attachments are not preserved. The unstamped capture is not stored separately.
 - Media share 9,999 filename slots, from `IMG_0001` through `IMG_9999`. Deletion is permanent. Orphaned sidecars also occupy slots.
 - Storage is in the app's Application Support directory. There is no cloud sync, database, import, backup/restore tool, or schema migration. System backup behavior was not verified.
 - Editing produces new pixels or movie output. New photo copies do not inherit Reports, Keywords, or album membership. New video copies inherit existing Report/INFO sidecars, but not album membership. Preservation of HDR/Dolby Vision after editing is unverified.

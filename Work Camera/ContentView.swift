@@ -15,6 +15,7 @@ struct ContentView: View {
         case timer
         case grid
         case shutterSound
+        case dateTimeStamp
     }
 
     @Environment(\.scenePhase) private var scenePhase
@@ -27,6 +28,7 @@ struct ContentView: View {
     @State private var cameraPageWasShown = false
     @State private var showGrid = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
+    @AppStorage("photoDateTimeStampEnabled") private var photoDateTimeStampEnabled = false
     @State private var showCameraControls = false
     @State private var activeControl: CameraControl?
     @State private var timerSeconds = 0
@@ -703,7 +705,8 @@ struct ContentView: View {
     }
 
     private var photoControlsPanelContent: some View {
-        HStack(alignment: .top, spacing: 24) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24), count: 3),
+                  alignment: .center, spacing: 24) {
             videoControlButton(.exposure, title: "EXPOSURE", symbol: "plusminus", value: exposureLabel)
                 .disabled(!camera.isReady || camera.isBusy || camera.isRecording ||
                           countdownRemaining != nil || !camera.canAdjustExposure)
@@ -748,6 +751,27 @@ struct ContentView: View {
             }
             .accessibilityLabel("Shutter sound")
             .accessibilityValue(camera.canSuppressShutterSound ? (shutterSoundEnabled ? "On" : "Off") : "Unavailable")
+
+            Button {
+                showCameraControls = false
+                activeControl = .dateTimeStamp
+            } label: {
+                VStack(spacing: 10) {
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 26, weight: .light))
+                        .frame(width: 68, height: 68)
+                        .background(photoDateTimeStampEnabled ? .white.opacity(0.2) : .black.opacity(0.5), in: Circle())
+                    Text("DATE & TIME")
+                        .font(.system(size: 13, weight: .regular))
+                        .tracking(1.5)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .rotationEffect(controlLabelAngle)
+                .frame(maxWidth: .infinity)
+            }
+            .accessibilityLabel("Photo date and time stamp")
+            .accessibilityValue(photoDateTimeStampEnabled ? "On" : "Off")
         }
     }
 
@@ -756,7 +780,7 @@ struct ContentView: View {
             HStack {
                 Button {
                     activeControl = nil
-                    showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound
+                    showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 20, weight: .medium))
@@ -808,6 +832,13 @@ struct ContentView: View {
                 case .grid:
                     settingOption("On", symbol: "square.grid.3x3", selected: showGrid) { showGrid = true }
                     settingOption("Off", symbol: "square.grid.3x3", selected: !showGrid) { showGrid = false }
+                case .dateTimeStamp:
+                    settingOption("On", symbol: "calendar.badge.clock", selected: photoDateTimeStampEnabled) {
+                        photoDateTimeStampEnabled = true
+                    }
+                    settingOption("Off", symbol: "calendar", selected: !photoDateTimeStampEnabled) {
+                        photoDateTimeStampEnabled = false
+                    }
                 case .shutterSound:
                     settingOption("On", symbol: "speaker.wave.2.fill",
                                   selected: camera.canSuppressShutterSound && shutterSoundEnabled) {
@@ -841,7 +872,7 @@ struct ContentView: View {
         })
         .accessibilityAction(.escape) {
             activeControl = nil
-            showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound
+            showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp
         }
     }
 
@@ -851,6 +882,7 @@ struct ContentView: View {
         case .exposure: "EXPOSURE"
         case .timer: "TIMER"
         case .grid: "GRID"
+        case .dateTimeStamp: "DATE & TIME"
         case .shutterSound: "SHUTTER SOUND"
         }
     }
@@ -861,6 +893,7 @@ struct ContentView: View {
         case .exposure: exposureLabel
         case .timer: timerSeconds == 0 ? "Off" : "\(timerSeconds)s"
         case .grid: showGrid ? "On" : "Off"
+        case .dateTimeStamp: photoDateTimeStampEnabled ? "On" : "Off"
         case .shutterSound: camera.canSuppressShutterSound ? (shutterSoundEnabled ? "On" : "Off") : "Unavailable"
         }
     }
@@ -945,7 +978,7 @@ struct ContentView: View {
         } else if timerSeconds > 0 {
             startCountdown()
         } else {
-            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled)
+            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled)
         }
     }
 
@@ -969,7 +1002,7 @@ struct ContentView: View {
             countdownID = nil
             countdownRemaining = nil
             countdownTask = nil
-            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled)
+            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled)
         }
     }
 

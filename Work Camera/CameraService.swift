@@ -268,6 +268,7 @@ final class CameraService: NSObject, ObservableObject {
     private let locationManager = CLLocationManager()
     private var latestLocation: CLLocation?
     private var photoLocation: CLLocation?
+    private var photoDateTimeText: String?
     private var videoCaptureDetails: VideoCaptureDetails?
     @Published private var hasRecordingStarted = false
 
@@ -424,7 +425,7 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func takePhoto(shutterSoundEnabled: Bool) {
+    func takePhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) {
         guard isReady, !isBusy, !isRecording else { return }
         guard videoInput?.device.isVirtualDevice == false else {
             errorMessage = "Virtual cameras are not allowed."
@@ -477,6 +478,9 @@ final class CameraService: NSObject, ObservableObject {
             print("[WorkCamera Photo] id=\(settings.uniqueID) supported=[\(supported)] outputMax=\(outputMaximum.width)x\(outputMaximum.height) requested=\(requested.width)x\(requested.height) quality=quality flash=\(settings.flashMode.rawValue)")
             logHighResolutionFormats(for: device, captureID: settings.uniqueID)
         }
+        // Snapshot both the local time and the option at the actual shutter,
+        // after any countdown, rather than when processing finishes.
+        photoDateTimeText = dateTimeStampEnabled ? PhotoDateTimeStamp.text(for: Date()) : nil
         photoOutput.capturePhoto(with: settings, delegate: self)
     }
 
@@ -1219,11 +1223,27 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             let resolved = photo.resolvedSettings
             let dimensions = resolved.photoDimensions
             print("[WorkCamera Photo] id=\(resolved.uniqueID) resolved=\(dimensions.width)x\(dimensions.height) error=\(error?.localizedDescription ?? "none")")
-            let data: Data?
+            defer {
+                self.photoLocation = nil
+                self.photoDateTimeText = nil
+                self.isBusy = false
+            }
+            var data: Data?
             if error == nil, let location = self.photoLocation {
                 data = photo.fileDataRepresentation(with: PhotoMetadataCustomizer(location: location))
             } else {
                 data = error == nil ? photo.fileDataRepresentation() : nil
+            }
+            if let originalData = data, let text = self.photoDateTimeText {
+                do {
+                    // Full-resolution rendering and HEIC encoding can be costly.
+                    data = try await Task.detached(priority: .userInitiated) {
+                        try PhotoDateTimeStamp.apply(to: originalData, text: text)
+                    }.value
+                } catch {
+                    self.errorMessage = error.localizedDescription
+                    return
+                }
             }
             if let data,
                let source = CGImageSourceCreateWithData(data as CFData, nil),
@@ -1232,8 +1252,6 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
                let height = properties[kCGImagePropertyPixelHeight as String] as? NSNumber {
                 print("[WorkCamera Photo] id=\(resolved.uniqueID) file=\(width.intValue)x\(height.intValue)")
             }
-            self.photoLocation = nil
-            self.isBusy = false
             if let error { self.errorMessage = error.localizedDescription }
             else if let data { self.onPhoto?(data) }
             else { self.errorMessage = "The photo could not be saved." }
