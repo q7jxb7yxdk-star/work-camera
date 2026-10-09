@@ -21,6 +21,7 @@ struct ContentView: View {
     @ObservedObject var navigation: CameraSceneNavigation
     @StateObject private var store = MediaStore()
     @StateObject private var camera = CameraService()
+    @State private var didPrepareRoot = false
     @State private var showGrid = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
     @AppStorage("photoDateTimeStampEnabled") private var photoDateTimeStampEnabled = false
@@ -39,7 +40,8 @@ struct ContentView: View {
     private var libraryFlowActive: Bool { navigation.libraryVisible }
 
     var body: some View {
-        Group {
+        // A stable container owns lifecycle work across destination changes.
+        ZStack {
             if libraryFlowActive {
                 NavigationStack {
                     LibraryView(store: store, quickAction: navigation.quickAction) {
@@ -68,6 +70,8 @@ struct ContentView: View {
             Text(errorMessage ?? camera.errorMessage ?? navigation.errorMessage ?? "Unknown error")
         }
         .task {
+            guard !didPrepareRoot else { return }
+            didPrepareRoot = true
             camera.onPhoto = { data in
                 do { try store.savePhoto(data) }
                 catch { errorMessage = error.localizedDescription }
@@ -95,7 +99,6 @@ struct ContentView: View {
                 cancelCountdown()
                 showCameraControls = false
                 activeControl = nil
-                camera.stop()
             }
         }
         .onChange(of: camera.mode) { _, newMode in
@@ -130,11 +133,9 @@ struct ContentView: View {
     }
 
     private func openLibrary() {
-        cancelCountdown()
-        showCameraControls = false
-        activeControl = nil
-        camera.stop()
+        // Publish the destination without waiting for camera hardware cleanup.
         navigation.openLibrary()
+        cancelCountdown()
     }
 
     private func updateCameraScene(_ scene: UIWindowScene) {
@@ -318,6 +319,9 @@ struct ContentView: View {
             CameraPreview(
                 session: camera.session,
                 device: camera.previewDevice,
+                shouldAttachSession: { [navigation] in
+                    !navigation.libraryVisible
+                },
                 onDeviceOrientationChange: { orientation in
                     if deviceOrientation != orientation {
                         deviceOrientation = orientation
@@ -1138,7 +1142,7 @@ private struct LibraryView: View {
     }
 
     private var displayedItems: [MediaItem] {
-        scopedItems.filter { item in
+        return scopedItems.filter { item in
             filter.includes(item) &&
             (tab != .search || searchIndex.matches(item, query: searchText))
         }
@@ -1192,7 +1196,9 @@ private struct LibraryView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .preferredColorScheme(nil)
-        .onAppear { applyQuickAction() }
+        .onAppear {
+            applyQuickAction()
+        }
         .onChange(of: quickAction) { _, _ in applyQuickAction() }
         .sheet(item: $selectionSharePayload) { payload in
             LibraryShareSheet(urls: payload.urls)

@@ -36,6 +36,7 @@ struct CameraQuickActionRequest: Equatable {
     let action: CameraQuickAction
 }
 
+
 // Each scene resolves its destination before ContentView is created.
 @MainActor
 final class CameraSceneNavigation: ObservableObject {
@@ -346,6 +347,7 @@ private final class FixedPortraitCameraController: UIViewController {
         view.addSubview(hosting.view)
         hosting.didMove(toParent: self)
     }
+
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()

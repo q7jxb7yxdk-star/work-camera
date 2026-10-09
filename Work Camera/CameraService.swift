@@ -7,6 +7,24 @@ import ImageIO
 import SwiftUI
 import UIKit
 
+// Only request identity crosses actors. Never hold this lock during camera work.
+nonisolated private final class CameraSessionRequestState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var currentID: UUID?
+
+    func replace(with id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        currentID = id
+    }
+
+    func isCurrent(_ id: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentID == id
+    }
+}
+
 @MainActor
 final class CameraService: NSObject, ObservableObject {
     enum Mode: Hashable {
@@ -244,6 +262,10 @@ final class CameraService: NSObject, ObservableObject {
     private var captureRotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var isConfigured = false
     private var wantsRunning = false
+    private let sessionRequestState = CameraSessionRequestState()
+    private var sessionRequestID: UUID?
+    private var sessionStartPending = false
+    private var stopQueued = false
     private var sessionLifecycleSubscriptions: [AnyCancellable] = []
     private var shouldResetZoomOnStart = true
     private var autoMacroTask: Task<Void, Never>?
@@ -336,7 +358,7 @@ final class CameraService: NSObject, ObservableObject {
 
     private func updateSessionReadiness() {
         let wasReady = isReady
-        isReady = wantsRunning && session.isRunning && !session.isInterrupted &&
+        isReady = wantsRunning && !sessionStartPending && session.isRunning && !session.isInterrupted &&
             UIApplication.shared.applicationState == .active
         guard isReady else { return }
         if errorMessage == "Could not start the camera." { errorMessage = nil }
@@ -364,12 +386,20 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func start() async {
+        guard !Task.isCancelled else { return }
         wantsRunning = true
         guard !isRecording else { return }
+        let requestID = UUID()
+        sessionRequestID = requestID
+        sessionRequestState.replace(with: requestID)
+        sessionStartPending = true
+        stopQueued = false
+        isReady = false
         isCameraAccessDenied = false
         let videoAllowed = await requestPermission(for: .video)
-        guard wantsRunning else { return }
+        guard canContinueStart(requestID) else { return }
         guard videoAllowed else {
+            sessionStartPending = false
             isAuthorized = false
             isCameraAccessDenied = true
             isReady = false
@@ -377,13 +407,27 @@ final class CameraService: NSObject, ObservableObject {
             return
         }
         let audioAllowed = await requestPermission(for: .audio)
-        guard wantsRunning else { return }
-        guard UIApplication.shared.applicationState == .active else { return }
+        guard canContinueStart(requestID) else { return }
+        guard UIApplication.shared.applicationState == .active else {
+            sessionStartPending = false
+            return
+        }
+        // Finish any already executing shutdown before configuring or restoring
+        // controls. Awaiting this queue leaves the UI free to show Library.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            sessionQueue.async { continuation.resume() }
+        }
+        guard canContinueStart(requestID) else { return }
+        guard UIApplication.shared.applicationState == .active else {
+            sessionStartPending = false
+            return
+        }
         isAuthorized = true
         updateLocationTracking()
         if !isConfigured {
             do { try configure(includeAudio: audioAllowed) }
             catch {
+                sessionStartPending = false
                 errorMessage = error.localizedDescription
                 return
             }
@@ -394,9 +438,13 @@ final class CameraService: NSObject, ObservableObject {
             resetZoomToOne()
         }
         let captureSession = session
+        let requestState = sessionRequestState
         sessionQueue.async {
+            guard requestState.isCurrent(requestID) else { return }
             if !captureSession.isRunning { captureSession.startRunning() }
             Task { @MainActor in
+                guard self.sessionRequestID == requestID, self.wantsRunning else { return }
+                self.sessionStartPending = false
                 self.updateSessionReadiness()
                 if self.wantsRunning && !captureSession.isRunning &&
                     !captureSession.isInterrupted && UIApplication.shared.applicationState == .active {
@@ -404,6 +452,15 @@ final class CameraService: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func canContinueStart(_ requestID: UUID) -> Bool {
+        guard sessionRequestID == requestID, wantsRunning else { return false }
+        guard !Task.isCancelled else {
+            stop()
+            return false
+        }
+        return true
     }
 
     func resetZoomOnNextStart() {
@@ -414,14 +471,52 @@ final class CameraService: NSObject, ObservableObject {
         wantsRunning = false
         stopAutoMacroMonitoring()
         updateLocationTracking()
-        guard !isRecording else { return }
-        if let device = videoInput?.device {
-            applyCameraControls(to: device, enabled: false)
+        guard !isRecording else {
+            return
         }
         isReady = false
+        sessionStartPending = false
+        guard !stopQueued else {
+            return
+        }
+        stopQueued = true
+        let requestID = UUID()
+        sessionRequestID = requestID
+        sessionRequestState.replace(with: requestID)
+        let requestState = sessionRequestState
+        let device = videoInput?.device
         let captureSession = session
         sessionQueue.async {
-            if captureSession.isRunning { captureSession.stopRunning() }
+            guard requestState.isCurrent(requestID) else {
+                return
+            }
+            var cleanupError: String?
+            if let device {
+                do { try Self.resetStoppedCameraControls(on: device) }
+                catch { cleanupError = error.localizedDescription }
+            }
+            if captureSession.isRunning {
+                captureSession.stopRunning()
+            }
+            if let cleanupError {
+                Task { @MainActor in
+                    guard self.sessionRequestID == requestID, !self.wantsRunning else { return }
+                    self.errorMessage = cleanupError
+                }
+            }
+        }
+    }
+
+    // Shutdown uses device state only; published preferences stay on MainActor.
+    nonisolated private static func resetStoppedCameraControls(on device: AVCaptureDevice) throws {
+        try device.lockForConfiguration()
+        defer { device.unlockForConfiguration() }
+        if device.hasTorch, device.isTorchModeSupported(.off), device.torchMode != .off {
+            device.torchMode = .off
+        }
+        let neutralBias = min(max(Float(0), device.minExposureTargetBias), device.maxExposureTargetBias)
+        if device.isExposureModeSupported(.continuousAutoExposure), device.exposureTargetBias != neutralBias {
+            device.setExposureTargetBias(neutralBias, completionHandler: nil)
         }
     }
 
@@ -1361,6 +1456,9 @@ private enum CameraError: LocalizedError {
 struct CameraPreview: UIViewControllerRepresentable {
     let session: AVCaptureSession
     let device: AVCaptureDevice?
+    // Consult the live route, including when an outgoing hosting controller
+    // recreates a preview using an older SwiftUI view value.
+    let shouldAttachSession: @MainActor () -> Bool
     var onDeviceOrientationChange: (UIDeviceOrientation) -> Void
     var onWindowSceneChange: (UIWindowScene) -> Void
 
@@ -1369,14 +1467,21 @@ struct CameraPreview: UIViewControllerRepresentable {
         controller.onDeviceOrientationChange = onDeviceOrientationChange
         controller.onWindowSceneChange = onWindowSceneChange
         controller.previewView.previewLayer.videoGravity = .resizeAspectFill
-        controller.previewView.previewLayer.session = session
-        controller.setPreviewDevice(device)
+        attachSessionIfNeeded(to: controller)
         return controller
     }
 
     func updateUIViewController(_ controller: CameraPreviewController, context: Context) {
         controller.onDeviceOrientationChange = onDeviceOrientationChange
         controller.onWindowSceneChange = onWindowSceneChange
+        attachSessionIfNeeded(to: controller)
+    }
+
+    @MainActor
+    private func attachSessionIfNeeded(to controller: CameraPreviewController) {
+        guard shouldAttachSession() else {
+            return
+        }
         if controller.previewView.previewLayer.session !== session {
             controller.previewView.previewLayer.session = session
         }
@@ -1431,6 +1536,7 @@ final class CameraPreviewController: UIViewController {
         stopObservingDeviceOrientation()
         stopObservingPreviewLifecycle()
     }
+
 
     private func startObservingPreviewLifecycle() {
         guard previewLifecycleSubscriptions.isEmpty,
