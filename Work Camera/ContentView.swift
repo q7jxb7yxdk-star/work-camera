@@ -133,6 +133,7 @@ struct ContentView: View {
     }
 
     private func openLibrary() {
+        guard !camera.isBusy, !camera.isRecording, countdownRemaining == nil else { return }
         // Coordinate the destination geometry without waiting for camera hardware cleanup.
         navigation.openLibrary()
         cancelCountdown()
@@ -555,7 +556,7 @@ struct ContentView: View {
             .rotationEffect(controlLabelAngle)
         }
         .accessibilityLabel("Open Library")
-        .disabled(camera.isRecording || countdownRemaining != nil)
+        .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
     }
 
     private var switchCameraButton: some View {

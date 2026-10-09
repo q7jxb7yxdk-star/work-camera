@@ -194,12 +194,33 @@ final class MediaStore: ObservableObject {
     }
 
     func savePhoto(_ data: Data) throws {
-        let url = try nextAvailableURL(extension: "HEIC")
+        let url: URL
+        do {
+            url = try nextAvailableURL(extension: "HEIC")
+        } catch {
+            throw MediaStoreError.photoSaveFailed(stage: "prepare destination", underlying: error as NSError)
+        }
         let temporaryURL = mediaDirectory.appendingPathComponent(UUID().uuidString)
-        try data.write(to: temporaryURL, options: .atomic)
         defer { try? fileManager.removeItem(at: temporaryURL) }
-        try fileManager.linkItem(at: temporaryURL, to: url)
-        try load()
+        do {
+            try data.write(to: temporaryURL, options: .atomic)
+        } catch {
+            throw MediaStoreError.photoSaveFailed(stage: "write temporary file", underlying: error as NSError)
+        }
+        do {
+            // Move the completed file into place without replacing an existing capture.
+            try fileManager.moveItem(at: temporaryURL, to: url)
+        } catch {
+            throw MediaStoreError.photoSaveFailed(stage: "finalize file", underlying: error as NSError)
+        }
+        // The directory was loaded on entry. Add this capture without rescanning
+        // every existing file or reconciling the same caches a second time.
+        let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        items.insert(MediaItem(url: url, kind: .photo,
+                               createdAt: values?.creationDate ?? Date(),
+                               modifiedAt: values?.contentModificationDate ?? Date()), at: 0)
+        searchIndex.reconcile(items: items)
+        MediaThumbnailCache.shared.reconcile(items: items)
     }
 
     func saveEditedPhoto(_ data: Data, for item: MediaItem, overwrite: Bool) throws {
@@ -420,6 +441,7 @@ final class MediaStore: ObservableObject {
 }
 
 private enum MediaStoreError: LocalizedError {
+    case photoSaveFailed(stage: String, underlying: NSError)
     case noAvailableFilename
     case invalidEditedPhoto
     case invalidEditedVideo
@@ -431,6 +453,8 @@ private enum MediaStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .photoSaveFailed(let stage, let error):
+            "The photo could not be saved (\(stage)): \(error.localizedDescription) [\(error.domain), code \(error.code)]"
         case .noAvailableFilename:
             "All IMG_0001 through IMG_9999 filenames are in use. Delete captures to free space."
         case .invalidEditedPhoto:

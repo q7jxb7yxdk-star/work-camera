@@ -563,45 +563,10 @@ final class CameraService: NSObject, ObservableObject {
         if !shutterSoundEnabled && photoOutput.isShutterSoundSuppressionSupported {
             settings.isShutterSoundSuppressionEnabled = true
         }
-        if let device = videoInput?.device {
-            let supported = device.activeFormat.supportedMaxPhotoDimensions
-                .map { "\($0.width)x\($0.height)" }.joined(separator: ", ")
-            let primary = device.isVirtualDevice ? device.activePrimaryConstituent : device
-            let requested = settings.maxPhotoDimensions
-            let outputMaximum = photoOutput.maxPhotoDimensions
-            print("[WorkCamera Photo] id=\(settings.uniqueID) camera=\(device.localizedName) primary=\(primary?.localizedName ?? "unavailable") zoom=\(zoomFactor)x deviceZoom=\(device.videoZoomFactor)x preset=\(session.sessionPreset.rawValue)")
-            print("[WorkCamera Photo] id=\(settings.uniqueID) supported=[\(supported)] outputMax=\(outputMaximum.width)x\(outputMaximum.height) requested=\(requested.width)x\(requested.height) quality=quality flash=\(settings.flashMode.rawValue)")
-            logHighResolutionFormats(for: device, captureID: settings.uniqueID)
-        }
         // Snapshot both the local time and the option at the actual shutter,
         // after any countdown, rather than when processing finishes.
         photoDateTimeText = dateTimeStampEnabled ? PhotoDateTimeStamp.text(for: Date()) : nil
         photoOutput.capturePhoto(with: settings, delegate: self)
-    }
-
-    private func logHighResolutionFormats(for device: AVCaptureDevice, captureID: Int64) {
-        let cameras = [device] + device.constituentDevices
-        for camera in cameras {
-            var matchingFormatCount = 0
-            var largestPixelCount: Int64 = 0
-            var largestDimensions = "none"
-            for (index, format) in camera.formats.enumerated() {
-                let highResolutionDimensions = format.supportedMaxPhotoDimensions.filter { dimensions in
-                    let pixels = Int64(dimensions.width) * Int64(dimensions.height)
-                    if pixels > largestPixelCount {
-                        largestPixelCount = pixels
-                        largestDimensions = "\(dimensions.width)x\(dimensions.height)"
-                    }
-                    return pixels >= 48_000_000
-                }
-                guard !highResolutionDimensions.isEmpty else { continue }
-                matchingFormatCount += 1
-                let dimensions = highResolutionDimensions
-                    .map { "\($0.width)x\($0.height)" }.joined(separator: ", ")
-                print("[WorkCamera Photo] id=\(captureID) camera=\(camera.localizedName) type=\(camera.deviceType.rawValue) formatIndex=\(index) active=\(format === camera.activeFormat) supported48MP=[\(dimensions)]")
-            }
-            print("[WorkCamera Photo] id=\(captureID) camera=\(camera.localizedName) formats48MP=\(matchingFormatCount) largestAcrossFormats=\(largestDimensions)")
-        }
     }
 
     func startRecording() {
@@ -1309,15 +1274,17 @@ final class CameraService: NSObject, ObservableObject {
 }
 
 extension CameraService: AVCapturePhotoCaptureDelegate {
+    private func photoErrorMessage(stage: String, error: Error) -> String {
+        let detail = error as NSError
+        return "Photo \(stage) failed: \(detail.localizedDescription) [\(detail.domain), code \(detail.code)]"
+    }
+
     nonisolated func photoOutput(
         _ output: AVCapturePhotoOutput,
         didFinishProcessingPhoto photo: AVCapturePhoto,
         error: Error?
     ) {
         Task { @MainActor in
-            let resolved = photo.resolvedSettings
-            let dimensions = resolved.photoDimensions
-            print("[WorkCamera Photo] id=\(resolved.uniqueID) resolved=\(dimensions.width)x\(dimensions.height) error=\(error?.localizedDescription ?? "none")")
             defer {
                 self.photoLocation = nil
                 self.photoDateTimeText = nil
@@ -1336,20 +1303,13 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
                         try PhotoDateTimeStamp.apply(to: originalData, text: text)
                     }.value
                 } catch {
-                    self.errorMessage = error.localizedDescription
+                    self.errorMessage = self.photoErrorMessage(stage: "date and time stamp", error: error)
                     return
                 }
             }
-            if let data,
-               let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
-               let width = properties[kCGImagePropertyPixelWidth as String] as? NSNumber,
-               let height = properties[kCGImagePropertyPixelHeight as String] as? NSNumber {
-                print("[WorkCamera Photo] id=\(resolved.uniqueID) file=\(width.intValue)x\(height.intValue)")
-            }
-            if let error { self.errorMessage = error.localizedDescription }
+            if let error { self.errorMessage = self.photoErrorMessage(stage: "capture processing", error: error) }
             else if let data { self.onPhoto?(data) }
-            else { self.errorMessage = "The photo could not be saved." }
+            else { self.errorMessage = "The captured photo could not be converted to file data. Please try taking the photo again." }
         }
     }
 }
