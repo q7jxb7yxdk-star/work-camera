@@ -40,99 +40,215 @@ struct CameraQuickActionRequest: Equatable {
 // Each scene resolves its destination before ContentView is created.
 @MainActor
 final class CameraSceneNavigation: ObservableObject {
-    @Published private(set) var libraryVisible: Bool
+    @Published private(set) var libraryVisible = false
+    @Published private(set) var isReadyToDisplay: Bool
     @Published private(set) var quickAction: CameraQuickActionRequest?
     @Published private(set) var scenePhase: ScenePhase = .inactive
     @Published var errorMessage: String?
+
+    private struct OrientationTransition {
+        let id = UUID()
+        let opensLibrary: Bool
+        var orientation: UIInterfaceOrientation
+        let action: CameraQuickActionRequest?
+    }
+
     private weak var scene: UIWindowScene?
     private weak var rootController: UIViewController?
-    private var returnRequestID: UUID?
-    private var needsLibraryEntryOrientation: Bool
+    private var pendingTransition: OrientationTransition?
+    private var needsOrientationUpdate = true
+    private var transitionTimeout: Task<Void, Never>?
+    private var deviceOrientationSubscription: AnyCancellable?
+    private var isGeneratingOrientationNotifications = false
     private var isDisconnected = false
 
     init(initialAction: CameraQuickAction?) {
-        libraryVisible = initialAction != nil
-        needsLibraryEntryOrientation = initialAction != nil
-        quickAction = initialAction.map { CameraQuickActionRequest(action: $0) }
+        isReadyToDisplay = initialAction == nil
+        if let initialAction {
+            // Install the entry policy before SwiftUI constructs the destination.
+            pendingTransition = OrientationTransition(
+                opensLibrary: true, orientation: .unknown,
+                action: CameraQuickActionRequest(action: initialAction)
+            )
+        }
     }
 
     func attach(to scene: UIWindowScene, rootController: UIViewController? = nil) {
         guard !isDisconnected else { return }
         self.scene = scene
-        self.rootController = rootController ?? scene.windows.first(where: \.isKeyWindow)?.rootViewController
-        CameraOrientationPolicy.setLibraryVisible(libraryVisible && returnRequestID == nil, in: scene)
-        self.rootController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        updateLibraryEntryOrientation()
+        if !isGeneratingOrientationNotifications {
+            isGeneratingOrientationNotifications = true
+            deviceOrientationSubscription = NotificationCenter.default
+                .publisher(for: UIDevice.orientationDidChangeNotification)
+                .sink { [weak self] _ in
+                    Task { @MainActor [weak self] in
+                        guard let self, !self.isDisconnected else { return }
+                        self.resolveUnspecifiedOrientation()
+                        self.updateOrientationPolicy()
+                        self.finishTransitionIfReady()
+                        self.requestOrientationUpdateIfNeeded()
+                    }
+                }
+            UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        }
+        let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first
+        let controller = rootController ?? window?.rootViewController
+        if self.rootController !== controller {
+            self.rootController = controller
+            needsOrientationUpdate = true
+        }
+        resolveUnspecifiedOrientation()
+        updateOrientationPolicy()
+        finishTransitionIfReady()
+        requestOrientationUpdateIfNeeded()
     }
 
     func setScenePhase(_ phase: ScenePhase) {
+        guard !isDisconnected else { return }
         scenePhase = phase
         if phase == .active {
-            finishReturnIfPortrait()
-            updateLibraryEntryOrientation()
+            resolveUnspecifiedOrientation()
+            updateOrientationPolicy()
+            finishTransitionIfReady()
+            requestOrientationUpdateIfNeeded()
+        } else {
+            transitionTimeout?.cancel()
+            transitionTimeout = nil
+            if pendingTransition != nil { needsOrientationUpdate = true }
         }
     }
 
     func openLibrary(action: CameraQuickAction? = nil) {
-        // A new shortcut cancels any pending return and replaces its destination.
-        returnRequestID = nil
-        errorMessage = nil
-        quickAction = action.map { CameraQuickActionRequest(action: $0) }
-        if let scene { CameraOrientationPolicy.setLibraryVisible(true, in: scene) }
-        libraryVisible = true
-        needsLibraryEntryOrientation = true
-        rootController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        updateLibraryEntryOrientation()
-    }
-
-    private func updateLibraryEntryOrientation() {
-        guard needsLibraryEntryOrientation, libraryVisible,
-              scenePhase == .active, let scene, rootController != nil else { return }
-        needsLibraryEntryOrientation = false
-        let orientation: UIInterfaceOrientationMask
-        switch UIDevice.current.orientation {
-        case .landscapeLeft: orientation = .landscapeRight
-        case .landscapeRight: orientation = .landscapeLeft
-        default: orientation = .portrait
-        }
-        // Enter using the handset orientation, then allow normal Library rotation.
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+        guard !isDisconnected else { return }
+        beginTransition(opensLibrary: true,
+                        orientation: scene.map { libraryEntryOrientation(in: $0) } ?? .unknown,
+                        action: action.map { CameraQuickActionRequest(action: $0) })
     }
 
     func returnToCamera() {
-        guard libraryVisible, returnRequestID == nil, let scene else { return }
-        let requestID = UUID()
-        returnRequestID = requestID
-        needsLibraryEntryOrientation = false
-        CameraOrientationPolicy.setLibraryVisible(false, in: scene)
-        rootController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-        if scene.effectiveGeometry.interfaceOrientation == .portrait {
-            finishReturnIfPortrait()
-        } else {
-            // Library remains the actual root content until geometry is portrait.
-            scene.requestGeometryUpdate(.iOS(interfaceOrientations: .portrait)) { [weak self] error in
-                DispatchQueue.main.async {
-                    guard let self, self.returnRequestID == requestID else { return }
-                    self.returnRequestID = nil
-                    CameraOrientationPolicy.setLibraryVisible(true, in: scene)
-                    self.rootController?.setNeedsUpdateOfSupportedInterfaceOrientations()
-                    self.errorMessage = "Could not return to the camera: \(error.localizedDescription)"
-                }
+        guard !isDisconnected, libraryVisible || pendingTransition != nil else { return }
+        beginTransition(opensLibrary: false, orientation: .portrait, action: nil)
+    }
+
+    private func beginTransition(opensLibrary: Bool, orientation: UIInterfaceOrientation,
+                                 action: CameraQuickActionRequest?) {
+        transitionTimeout?.cancel()
+        transitionTimeout = nil
+        errorMessage = nil
+        pendingTransition = OrientationTransition(opensLibrary: opensLibrary,
+                                                  orientation: orientation, action: action)
+        needsOrientationUpdate = true
+        updateOrientationPolicy()
+        finishTransitionIfReady()
+        requestOrientationUpdateIfNeeded()
+    }
+
+    private func libraryEntryOrientation(in scene: UIWindowScene) -> UIInterfaceOrientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: return .landscapeRight
+        case .landscapeRight: return .landscapeLeft
+        case .portrait: return .portrait
+        case .unknown: return .unknown
+        default:
+            // Face-up/down readings retain a valid scene orientation.
+            let current = scene.effectiveGeometry.interfaceOrientation
+            switch current {
+            case .portrait, .landscapeLeft, .landscapeRight: return current
+            default: return .unknown
             }
         }
     }
 
-    func finishReturnIfPortrait() {
-        guard returnRequestID != nil,
-              scene?.effectiveGeometry.interfaceOrientation == .portrait else { return }
-        returnRequestID = nil
-        quickAction = nil
-        libraryVisible = false
+    private func resolveUnspecifiedOrientation() {
+        // Cold shortcuts have no camera preview to generate device orientation
+        // readings. Wait for a real reading after activation/window attachment.
+        guard pendingTransition?.orientation == .unknown, scenePhase == .active,
+              rootController != nil, let scene else { return }
+        let orientation = libraryEntryOrientation(in: scene)
+        guard orientation != .unknown else { return }
+        pendingTransition?.orientation = orientation
+        needsOrientationUpdate = true
+    }
+
+    private func updateOrientationPolicy() {
+        guard let scene else { return }
+        let mask: UIInterfaceOrientationMask
+        if let pendingTransition {
+            switch pendingTransition.orientation {
+            case .landscapeLeft: mask = .landscapeLeft
+            case .landscapeRight: mask = .landscapeRight
+            case .unknown:
+                // Existing camera content stays portrait until a real target is
+                // known. Cold entry lets UIKit establish the initial scene.
+                mask = !isReadyToDisplay || libraryVisible ? .allButUpsideDown : .portrait
+            default: mask = .portrait
+            }
+        } else {
+            mask = libraryVisible ? .allButUpsideDown : .portrait
+        }
+        CameraOrientationPolicy.setSupportedOrientations(mask, in: scene)
+    }
+
+    private func requestOrientationUpdateIfNeeded() {
+        guard needsOrientationUpdate, scenePhase == .active, let rootController else { return }
+        needsOrientationUpdate = false
+        // UIKit explicitly supports a nonanimated orientation update through this
+        // API. Geometry requests do not provide that same animation guarantee.
+        UIView.performWithoutAnimation {
+            rootController.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        finishTransitionIfReady()
+        guard let pendingTransition else { return }
+        let requestID = pendingTransition.id
+        transitionTimeout?.cancel()
+        transitionTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(3)) }
+            catch { return }
+            guard let self, !Task.isCancelled,
+                  self.pendingTransition?.id == requestID, self.scenePhase == .active else { return }
+            self.finishTransitionIfReady()
+            guard self.pendingTransition?.id == requestID else { return }
+            // A timeout reports a rejected/unfulfilled update; it never reveals
+            // the requested page using the wrong orientation as a fallback.
+            self.pendingTransition = nil
+            self.transitionTimeout = nil
+            self.isReadyToDisplay = true
+            self.updateOrientationPolicy()
+            self.needsOrientationUpdate = true
+            self.requestOrientationUpdateIfNeeded()
+            self.errorMessage = "Could not change the screen orientation. Please try again."
+        }
+    }
+
+    func finishTransitionIfReady() {
+        guard let transition = pendingTransition, transition.orientation != .unknown, let scene,
+              scene.effectiveGeometry.interfaceOrientation == transition.orientation,
+              let window = scene.windows.first(where: \.isKeyWindow),
+              window.bounds.width > 0, window.bounds.height > 0 else { return }
+        // Geometry can be reported before the window's layout has caught up.
+        let size = window.bounds.size
+        guard transition.orientation.isLandscape ? size.width > size.height : size.height >= size.width else { return }
+        transitionTimeout?.cancel()
+        transitionTimeout = nil
+        pendingTransition = nil
+        quickAction = transition.action
+        libraryVisible = transition.opensLibrary
+        isReadyToDisplay = true
+        updateOrientationPolicy()
+        needsOrientationUpdate = true
+        requestOrientationUpdateIfNeeded()
     }
 
     func disconnect() {
         isDisconnected = true
-        returnRequestID = nil
+        transitionTimeout?.cancel()
+        transitionTimeout = nil
+        deviceOrientationSubscription = nil
+        if isGeneratingOrientationNotifications {
+            UIDevice.current.endGeneratingDeviceOrientationNotifications()
+            isGeneratingOrientationNotifications = false
+        }
+        pendingTransition = nil
         scenePhase = .background
         scene = nil
         rootController = nil
@@ -156,10 +272,30 @@ private struct CameraSceneRoot: View {
 
     var body: some View {
         if let navigation = sceneDelegate.navigation {
-            ContentView(navigation: navigation)
-                .id(ObjectIdentifier(navigation))
+            CameraNavigationRoot(navigation: navigation)
         }
         // No camera or Library is constructed until the scene resolves its entry.
+    }
+}
+
+private struct CameraNavigationRoot: View {
+    @ObservedObject var navigation: CameraSceneNavigation
+
+    var body: some View {
+        ZStack {
+            if navigation.isReadyToDisplay {
+                ContentView(navigation: navigation)
+                    .id(ObjectIdentifier(navigation))
+            }
+        }
+        .background {
+            // Resolve cold shortcut geometry before constructing its first
+            // page; this reader remains mounted throughout route changes.
+            CameraWindowSceneReader { scene in
+                navigation.attach(to: scene)
+            }
+            .frame(width: 0, height: 0)
+        }
     }
 }
 
@@ -243,7 +379,7 @@ final class CameraSceneDelegate: NSObject, UIWindowSceneDelegate, ObservableObje
     }
 
     func windowScene(_ windowScene: UIWindowScene, didUpdateEffectiveGeometry previousEffectiveGeometry: UIWindowScene.Geometry) {
-        navigation?.finishReturnIfPortrait()
+        navigation?.finishTransitionIfReady()
         NotificationCenter.default.post(name: CameraOrientationPolicy.geometryDidChange, object: windowScene)
     }
 
@@ -261,6 +397,7 @@ private final class CameraWindowSceneView: UIView {
     private weak var reportedScene: UIWindowScene?
     private var reportedOrientation: UIInterfaceOrientation?
     private var reportedInsets: UIEdgeInsets?
+    private var reportedSize: CGSize?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -303,10 +440,12 @@ private final class CameraWindowSceneView: UIView {
         guard let window, let scene = window.windowScene else { return }
         let orientation = scene.effectiveGeometry.interfaceOrientation
         let insets = window.safeAreaInsets
-        guard reportedScene !== scene || reportedOrientation != orientation || reportedInsets != insets else { return }
+        let size = window.bounds.size
+        guard reportedScene !== scene || reportedOrientation != orientation || reportedInsets != insets || reportedSize != size else { return }
         reportedScene = scene
         reportedOrientation = orientation
         reportedInsets = insets
+        reportedSize = size
         // Defer SwiftUI state changes until the UIKit view update has finished.
         DispatchQueue.main.async { [weak self, weak scene] in
             guard let scene, self?.window?.windowScene === scene else { return }
@@ -332,8 +471,8 @@ struct CameraWindowSceneReader: UIViewRepresentable {
     }
 }
 
-// The scene stays portrait while the camera is visible. The hosting bounds use
-// the same portrait size as the SwiftUI controls and preview.
+// The camera scene is portrait-only. Keep the controls and preview in those
+// fixed coordinates; handset rotation changes labels and capture orientation only.
 private final class FixedPortraitCameraController: UIViewController {
     private let hosting = UIHostingController(rootView: AnyView(EmptyView()))
     private var portraitSize: CGSize = .zero
@@ -343,11 +482,11 @@ private final class FixedPortraitCameraController: UIViewController {
         view.backgroundColor = .black
         hosting.safeAreaRegions = []
         hosting.view.backgroundColor = .black
+        hosting.view.autoresizingMask = []
         addChild(hosting)
         view.addSubview(hosting.view)
         hosting.didMove(toParent: self)
     }
-
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -385,19 +524,17 @@ struct FixedPortraitCameraCanvas<Content: View>: UIViewControllerRepresentable {
 @MainActor
 enum CameraOrientationPolicy {
     static let geometryDidChange = Notification.Name("WorkCameraSceneGeometryDidChange")
-    private static var librarySceneIDs: Set<String> = []
+    private static var sceneMasks: [String: UIInterfaceOrientationMask] = [:]
 
     static func supportedOrientations(for scene: UIWindowScene) -> UIInterfaceOrientationMask {
-        librarySceneIDs.contains(scene.session.persistentIdentifier) ? .allButUpsideDown : .portrait
+        sceneMasks[scene.session.persistentIdentifier] ?? .portrait
     }
 
-    static func setLibraryVisible(_ visible: Bool, in scene: UIWindowScene) {
-        let identifier = scene.session.persistentIdentifier
-        if visible { librarySceneIDs.insert(identifier) }
-        else { librarySceneIDs.remove(identifier) }
+    static func setSupportedOrientations(_ mask: UIInterfaceOrientationMask, in scene: UIWindowScene) {
+        sceneMasks[scene.session.persistentIdentifier] = mask
     }
 
     static func removeScene(_ scene: UIScene) {
-        librarySceneIDs.remove(scene.session.persistentIdentifier)
+        sceneMasks.removeValue(forKey: scene.session.persistentIdentifier)
     }
 }

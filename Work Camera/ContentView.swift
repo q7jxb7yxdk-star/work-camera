@@ -51,7 +51,7 @@ struct ContentView: View {
             } else if let size = portraitCameraSize {
                 cameraPage(size: size)
             } else {
-                // Only normal camera entry waits for its first portrait layout.
+                // Camera entry waits for its first portrait layout.
                 Color(uiColor: .systemBackground).ignoresSafeArea()
             }
         }
@@ -133,30 +133,24 @@ struct ContentView: View {
     }
 
     private func openLibrary() {
-        // Publish the destination without waiting for camera hardware cleanup.
+        // Coordinate the destination geometry without waiting for camera hardware cleanup.
         navigation.openLibrary()
         cancelCountdown()
     }
 
     private func updateCameraScene(_ scene: UIWindowScene) {
-        // Bind orientation requests to the root controller managed by SwiftUI.
-        let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first
-        navigation.attach(to: scene, rootController: window?.rootViewController)
-        let orientation = scene.effectiveGeometry.interfaceOrientation
-        // Capture one portrait layout for the camera. Both
-        // SwiftUI content and its UIKit canvas keep these dimensions thereafter.
-        if portraitCameraSize == nil, orientation == .portrait,
-           let window {
-            window.layoutIfNeeded()
-            let insets = window.safeAreaInsets
-            let size = window.bounds.size
-            // A newly attached window can report zero before its first layout.
-            if insets != .zero, size.width > 0, size.height > 0 {
-                portraitCameraInsets = insets
-                portraitCameraSize = CGSize(width: min(size.width, size.height),
-                                            height: max(size.width, size.height))
-            }
-        }
+        navigation.attach(to: scene)
+        guard portraitCameraSize == nil,
+              scene.effectiveGeometry.interfaceOrientation == .portrait,
+              let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first else { return }
+        window.layoutIfNeeded()
+        let insets = window.safeAreaInsets
+        let size = window.bounds.size
+        guard insets != .zero, size.width > 0, size.height > 0,
+              size.height >= size.width else { return }
+        portraitCameraInsets = insets
+        portraitCameraSize = CGSize(width: min(size.width, size.height),
+                                    height: max(size.width, size.height))
     }
 
     // Rotate labels only. Button frames and PHOTO/VIDEO remain in portrait device coordinates.
