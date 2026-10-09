@@ -18,14 +18,9 @@ struct ContentView: View {
         case dateTimeStamp
     }
 
-    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject var navigation: CameraSceneNavigation
     @StateObject private var store = MediaStore()
     @StateObject private var camera = CameraService()
-    @ObservedObject private var quickActionRouter = CameraQuickActionRouter.shared
-    @State private var libraryQuickAction: CameraQuickActionRequest?
-    @State private var showLibrary = false
-    @State private var libraryFlowActive = false
-    @State private var cameraPageWasShown = false
     @State private var showGrid = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
     @AppStorage("photoDateTimeStampEnabled") private var photoDateTimeStampEnabled = false
@@ -37,66 +32,53 @@ struct ContentView: View {
     @State private var countdownID: UUID?
     @State private var errorMessage: String?
     @State private var deviceOrientation: UIDeviceOrientation = .portrait
-    @State private var cameraWindowScene: UIWindowScene?
     @State private var portraitCameraInsets: UIEdgeInsets?
     @State private var portraitCameraSize: CGSize?
 
+    private var scenePhase: ScenePhase { navigation.scenePhase }
+    private var libraryFlowActive: Bool { navigation.libraryVisible }
+
     var body: some View {
         Group {
-            if let size = portraitCameraSize, !libraryFlowActive || cameraPageWasShown {
+            if libraryFlowActive {
+                NavigationStack {
+                    LibraryView(store: store, quickAction: navigation.quickAction) {
+                        navigation.returnToCamera()
+                    }
+                }
+            } else if let size = portraitCameraSize {
                 cameraPage(size: size)
             } else {
-                // Resolve the scene and its launch action before creating the camera page.
+                // Only normal camera entry waits for its first portrait layout.
                 Color(uiColor: .systemBackground).ignoresSafeArea()
             }
         }
         .background {
-            ZStack {
-                CameraWindowSceneReader { scene in
-                    updateCameraScene(scene)
-                    openPendingQuickAction()
-                }
-                LibraryPresentation(
-                    isPresented: showLibrary,
-                    initialOrientation: libraryInitialOrientation,
-                    content: { requestDismissal in
-                        NavigationStack {
-                            LibraryView(store: store, quickAction: libraryQuickAction) {
-                                showLibrary = false
-                                requestDismissal()
-                            }
-                        }
-                        .alert("Error", isPresented: Binding(
-                            get: { libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
-                            set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
-                        )) {
-                            Button("OK") { errorMessage = nil; camera.errorMessage = nil }
-                        } message: {
-                            Text(errorMessage ?? camera.errorMessage ?? "Unknown error")
-                        }
-                    },
-                    onDidDismiss: libraryDidDismiss,
-                    onError: libraryPresentationFailed,
-                    onDismissCancelled: { message in
-                        showLibrary = true
-                        errorMessage = message
-                    }
-                )
+            CameraWindowSceneReader { scene in
+                updateCameraScene(scene)
             }
             .frame(width: 0, height: 0)
         }
         .alert("Error", isPresented: Binding(
-            get: { !libraryFlowActive && (errorMessage != nil || camera.errorMessage != nil) },
-            set: { if !$0 { errorMessage = nil; camera.errorMessage = nil } }
+            get: { errorMessage != nil || camera.errorMessage != nil || navigation.errorMessage != nil },
+            set: { if !$0 { clearErrors() } }
         )) {
-            Button("OK") {
-                errorMessage = nil
-                camera.errorMessage = nil
-            }
+            Button("OK") { clearErrors() }
         } message: {
-            Text(errorMessage ?? camera.errorMessage ?? "Unknown error")
+            Text(errorMessage ?? camera.errorMessage ?? navigation.errorMessage ?? "Unknown error")
         }
         .task {
+            camera.onPhoto = { data in
+                do { try store.savePhoto(data) }
+                catch { errorMessage = error.localizedDescription }
+            }
+            camera.onVideo = { temporaryURL, captureDetails in
+                do { try store.saveVideo(from: temporaryURL, captureDetails: captureDetails) }
+                catch {
+                    try? FileManager.default.removeItem(at: temporaryURL)
+                    errorMessage = error.localizedDescription
+                }
+            }
             do { try store.load() }
             catch { errorMessage = error.localizedDescription }
         }
@@ -104,9 +86,11 @@ struct ContentView: View {
             UIApplication.shared.isIdleTimerDisabled = keepAwake
         }
         .onDisappear {
+            cancelCountdown()
+            camera.stop()
             UIApplication.shared.isIdleTimerDisabled = false
         }
-        .onChange(of: showLibrary) { _, isPresented in
+        .onChange(of: libraryFlowActive) { _, isPresented in
             if isPresented {
                 cancelCountdown()
                 showCameraControls = false
@@ -119,75 +103,49 @@ struct ContentView: View {
             activeControl = nil
             showCameraControls = false
         }
-        .onChange(of: quickActionRouter.requests) { _, _ in
-            openPendingQuickAction()
-        }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active { cancelCountdown() }
-            if newPhase == .background {
-                camera.resetZoomOnNextStart()
-            } else if newPhase == .active {
-                openPendingQuickAction()
-                if !libraryFlowActive, cameraPageWasShown {
-                    Task { await camera.start() }
-                }
+            if newPhase == .background { camera.resetZoomOnNextStart() }
+        }
+        .task(id: shouldKeepScreenAwake) {
+            guard !Task.isCancelled else { return }
+            // Check the current route inside the task: a queued start must not
+            // restart capture after a shortcut has switched the root to Library.
+            if shouldKeepScreenAwake {
+                await camera.start()
+            } else {
+                camera.stop()
             }
         }
     }
 
     private var shouldKeepScreenAwake: Bool {
-        scenePhase == .active && cameraPageWasShown && !libraryFlowActive
+        scenePhase == .active && portraitCameraSize != nil && !libraryFlowActive
     }
 
-    private func openPendingQuickAction() {
-        guard let scene = cameraWindowScene,
-              let request = quickActionRouter.takeRequest(for: scene.session) else { return }
-        libraryQuickAction = request
+    private func clearErrors() {
+        errorMessage = nil
+        camera.errorMessage = nil
+        navigation.errorMessage = nil
+    }
+
+    private func openLibrary() {
         cancelCountdown()
         showCameraControls = false
         activeControl = nil
         camera.stop()
-        if !showLibrary { openLibrary() }
-    }
-
-    private func openLibrary() {
-        libraryFlowActive = true
-        showLibrary = true
-    }
-
-    private var libraryInitialOrientation: UIInterfaceOrientation {
-        let current = UIDevice.current.orientation
-        let orientation = current.isValidInterfaceOrientation ? current : deviceOrientation
-        switch orientation {
-        case .landscapeLeft: return .landscapeRight
-        case .landscapeRight: return .landscapeLeft
-        default: return .portrait
-        }
-    }
-
-    private func libraryDidDismiss() {
-        showLibrary = false
-        libraryFlowActive = false
-        libraryQuickAction = nil
-        // A retained camera page does not rerun its task after a modal closes.
-        // Cold quick-action launches instead create it now and use that task.
-        if cameraPageWasShown, scenePhase == .active {
-            Task { await camera.start() }
-        }
-    }
-
-    private func libraryPresentationFailed(_ message: String) {
-        libraryDidDismiss()
-        errorMessage = message
+        navigation.openLibrary()
     }
 
     private func updateCameraScene(_ scene: UIWindowScene) {
-        cameraWindowScene = scene
+        // Bind orientation requests to the root controller managed by SwiftUI.
+        let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first
+        navigation.attach(to: scene, rootController: window?.rootViewController)
         let orientation = scene.effectiveGeometry.interfaceOrientation
         // Capture one portrait layout for the camera. Both
         // SwiftUI content and its UIKit canvas keep these dimensions thereafter.
         if portraitCameraSize == nil, orientation == .portrait,
-           let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first {
+           let window {
             window.layoutIfNeeded()
             let insets = window.safeAreaInsets
             let size = window.bounds.size
@@ -217,23 +175,6 @@ struct ContentView: View {
         )
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
-        .onAppear { cameraPageWasShown = true }
-        .task {
-            camera.onPhoto = { data in
-                do { try store.savePhoto(data) }
-                catch { errorMessage = error.localizedDescription }
-            }
-            camera.onVideo = { temporaryURL, captureDetails in
-                do { try store.saveVideo(from: temporaryURL, captureDetails: captureDetails) }
-                catch {
-                    try? FileManager.default.removeItem(at: temporaryURL)
-                    errorMessage = error.localizedDescription
-                }
-            }
-            if scenePhase == .active, !libraryFlowActive {
-                await camera.start()
-            }
-        }
     }
 
     private func cameraCanvas(size: CGSize) -> some View {
@@ -384,7 +325,6 @@ struct ContentView: View {
                 },
                 onWindowSceneChange: { scene in
                     updateCameraScene(scene)
-                    openPendingQuickAction()
                 }
             )
             .gesture(
@@ -1390,6 +1330,7 @@ private struct LibraryView: View {
         guard let request = quickAction, appliedQuickActionID != request.id else { return }
         appliedQuickActionID = request.id
         detailItem = nil
+        selectionSharePayload = nil
         templateToEdit = nil
         showDeleteConfirmation = false
         showAlbumNamePrompt = false
