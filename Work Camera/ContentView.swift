@@ -92,7 +92,6 @@ struct ContentView: View {
         .onChange(of: libraryFlowActive) { _, isPresented in
             if isPresented {
                 cancelCountdown()
-                camera.cancelQueuedPhotos()
                 showCameraControls = false
                 activeControl = nil
             }
@@ -105,7 +104,6 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
                 cancelCountdown()
-                camera.cancelQueuedPhotos()
             }
             if newPhase == .background { camera.resetZoomOnNextStart() }
         }
@@ -508,10 +506,13 @@ struct ContentView: View {
     }
 
     private var shutterButton: some View {
-        Button { shutterTapped() } label: {
+        let isShutterDisabled = countdownRemaining == nil &&
+            (camera.mode == .photo ? !camera.canAcceptPhoto : (!camera.isReady || camera.isBusy))
+        let photoShutterColor: Color = isShutterDisabled ? .white.opacity(0.35) : .white
+        return Button { shutterTapped() } label: {
             ZStack {
                 Circle().strokeBorder(.white.opacity(0.35), lineWidth: 5).frame(width: 80, height: 80)
-                // Keep the light on for all accepted work, including queued photos.
+                // Keep the light on until submitted photos finish processing/saving.
                 // Completion presentation delays do not extend this indicator.
                 if camera.pendingPhotoCount > 0 || camera.isBusy {
                     Circle()
@@ -523,13 +524,13 @@ struct ContentView: View {
                 if camera.isRecording {
                     RoundedRectangle(cornerRadius: 5).fill(.red).frame(width: 30, height: 30)
                 } else {
-                    Circle().fill(camera.mode == .video ? .red : .white).frame(width: 68, height: 68)
+                    Circle().fill(camera.mode == .video ? .red : photoShutterColor).frame(width: 68, height: 68)
                 }
             }
         }
         .accessibilityLabel(countdownRemaining != nil ? "Cancel timer" : camera.isRecording ? "Stop recording" : camera.mode == .video ? "Record video" : "Take photo")
-        .accessibilityValue(camera.pendingPhotoCount > 0 ? "\(camera.pendingPhotoCount - camera.queuedPhotoCount) photos processing, \(camera.queuedPhotoCount) queued" : camera.isBusy ? "Processing video" : "")
-        .disabled(countdownRemaining == nil && (camera.mode == .photo ? !camera.canAcceptPhoto : (!camera.isReady || camera.isBusy)))
+        .accessibilityValue(camera.pendingPhotoCount > 0 ? "\(camera.pendingPhotoCount) photos processing" : camera.isBusy ? "Processing video" : "")
+        .disabled(isShutterDisabled)
     }
 
     private var controlsButton: some View {

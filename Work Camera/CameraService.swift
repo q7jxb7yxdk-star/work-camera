@@ -51,15 +51,17 @@ final class CameraService: NSObject, ObservableObject {
 
     @Published private(set) var processingState: ProcessingState?
     @Published private(set) var pendingPhotoCount = 0
-    @Published private(set) var queuedPhotoCount = 0
     @Published private(set) var isResponsivePhotoCaptureEnabled = false
     @Published private(set) var photoCaptureReadiness: AVCapturePhotoOutput.CaptureReadiness = .sessionNotRunning
 
-    // Availability to accept a tap is independent of hardware readiness.
+    // Accept taps only after the previous photo finishes processing/saving,
+    // and only when capture can be submitted immediately; never queue them.
     var canAcceptPhoto: Bool {
-        mode == .photo && isReady && wantsRunning && !isRecording &&
+        mode == .photo && isReady && wantsRunning && !sessionStartPending && !isRecording &&
         UIApplication.shared.applicationState == .active &&
-        session.isRunning && !session.isInterrupted && pendingPhotoCount < 3
+        session.isRunning && !session.isInterrupted &&
+        pendingPhotoCount == 0 &&
+        photoCaptureReadiness == .ready && photoOutput.captureReadiness == .ready
     }
 
     private func beginProcessing(mode: Mode) {
@@ -77,7 +79,6 @@ final class CameraService: NSObject, ObservableObject {
     @Published var mode: Mode = .photo {
         didSet {
             if mode != .photo {
-                cancelQueuedPhotos()
                 photoCompletionTask?.cancel()
                 photoCompletionTask = nil
                 completedPhotoStates.removeAll()
@@ -367,59 +368,9 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    private struct PhotoCaptureIntent {
-        let shutterSoundEnabled: Bool
-        let dateTimeStampEnabled: Bool
-#if DEBUG
-        let timing = CaptureTiming(startedAt: CaptureTiming.now())
-#endif
-    }
-
-    private var queuedPhotoIntents: [PhotoCaptureIntent] = []
-    private var isSubmittingQueuedPhotos = false
-
     private func updatePhotoCounts() {
-        queuedPhotoCount = queuedPhotoIntents.count
-        pendingPhotoCount = photoRequests.count + queuedPhotoCount
+        pendingPhotoCount = photoRequests.count
         isBusy = pendingPhotoCount > 0
-    }
-
-    func cancelQueuedPhotos() {
-        guard !queuedPhotoIntents.isEmpty else { return }
-#if DEBUG
-        for intent in queuedPhotoIntents {
-            intent.timing.event("photo.queueCancelled")
-            intent.timing.record("photo.total.cancelledBeforeCapture", since: intent.timing.startedAt)
-        }
-#endif
-        queuedPhotoIntents.removeAll()
-        updatePhotoCounts()
-#if DEBUG
-        recordPhotoShutterAvailability(source: "queueCancelled")
-#endif
-    }
-
-    private func submitQueuedPhotosIfReady() {
-        guard !isSubmittingQueuedPhotos else { return }
-        isSubmittingQueuedPhotos = true
-        defer { isSubmittingQueuedPhotos = false }
-        while !queuedPhotoIntents.isEmpty,
-              wantsRunning, isReady, !sessionStartPending,
-              session.isRunning, !session.isInterrupted,
-              UIApplication.shared.applicationState == .active,
-              mode == .photo, !isRecording,
-              photoRequests.count < (isResponsivePhotoCaptureEnabled ? 2 : 1),
-              photoOutput.captureReadiness == .ready {
-            let intent = queuedPhotoIntents.removeFirst()
-            if !submitPhoto(intent) {
-#if DEBUG
-                intent.timing.event("photo.queueSubmissionFailed")
-                intent.timing.record("photo.total.failedBeforeCapture", since: intent.timing.startedAt)
-#endif
-            }
-            updatePhotoCounts()
-            refreshPhotoReadiness()
-        }
     }
 
     private var photoRequests: [Int64: PhotoRequest] = [:]
@@ -470,7 +421,7 @@ final class CameraService: NSObject, ObservableObject {
         guard availabilityChanged || lastPhotoReadinessPendingCount != pendingPhotoCount else { return }
         lastPhotoShutterAvailable = available
         lastPhotoReadinessPendingCount = pendingPhotoCount
-        timing.event("photo.shutterAvailability available=\(available) published=\(photoReadinessName(photoCaptureReadiness)) live=\(photoReadinessName(liveReadiness)) pending=\(pendingPhotoCount) queued=\(queuedPhotoCount) limit=3 captureLimit=\(isResponsivePhotoCaptureEnabled ? 2 : 1) sessionReady=\(isReady) mode=\(mode == .photo ? "photo" : "video") recording=\(isRecording) source=\(source)")
+        timing.event("photo.shutterAvailability available=\(available) published=\(photoReadinessName(photoCaptureReadiness)) live=\(photoReadinessName(liveReadiness)) pending=\(pendingPhotoCount) captureLimit=1 sessionReady=\(isReady) mode=\(mode == .photo ? "photo" : "video") recording=\(isRecording) source=\(source)")
         if availabilityChanged {
             timing.record("photo.requestToShutter.\(available ? "available" : "blocked")", since: timing.startedAt)
         }
@@ -482,7 +433,6 @@ final class CameraService: NSObject, ObservableObject {
 #if DEBUG
         recordPhotoShutterAvailability(source: "refresh")
 #endif
-        submitQueuedPhotosIfReady()
     }
 
     private func refreshPhotoPresentation() {
@@ -570,7 +520,6 @@ final class CameraService: NSObject, ObservableObject {
                     MainActor.assumeIsolated {
                         guard let self else { return }
                         self.isReady = false
-                        self.cancelQueuedPhotos()
                         self.stopAutoMacroMonitoring()
                         if self.errorMessage == "Could not start the camera." {
                             self.errorMessage = nil
@@ -607,7 +556,6 @@ final class CameraService: NSObject, ObservableObject {
                 .sink { [weak self] _ in
                     MainActor.assumeIsolated {
                         self?.isReady = false
-                        self?.cancelQueuedPhotos()
                         self?.stopAutoMacroMonitoring()
                     }
                 }
@@ -728,7 +676,6 @@ final class CameraService: NSObject, ObservableObject {
 
     func stop() {
         wantsRunning = false
-        cancelQueuedPhotos()
         stopAutoMacroMonitoring()
         updateLocationTracking()
         guard !isRecording else {
@@ -781,27 +728,17 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func takePhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) {
+        // Recheck live readiness at the tap, even if the UI has not refreshed yet.
         guard canAcceptPhoto else { return }
-        let intent = PhotoCaptureIntent(
-            shutterSoundEnabled: shutterSoundEnabled,
-            dateTimeStampEnabled: dateTimeStampEnabled
-        )
-        queuedPhotoIntents.append(intent)
-        updatePhotoCounts()
-#if DEBUG
-        intent.timing.event("photo.queued pending=\(pendingPhotoCount) queued=\(queuedPhotoCount)")
-        recordPhotoShutterAvailability(source: "queueAccepted")
-#endif
+        _ = submitPhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: dateTimeStampEnabled)
         refreshPhotoReadiness()
     }
 
-    // Called synchronously only by the ready-gated FIFO pump. A fresh settings
-    // object and actual capture time/orientation/location are created here.
-    private func submitPhoto(_ intent: PhotoCaptureIntent) -> Bool {
-        let shutterSoundEnabled = intent.shutterSoundEnabled
-        let dateTimeStampEnabled = intent.dateTimeStampEnabled
+    // Snapshot capture settings and submit in the same main-actor turn as the tap.
+    private func submitPhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) -> Bool {
 #if DEBUG
         let requestStart = CaptureTiming.now()
+        let timing = CaptureTiming(startedAt: requestStart)
 #endif
         guard videoInput?.device.isVirtualDevice == false else {
             errorMessage = "Virtual cameras are not allowed."
@@ -854,8 +791,6 @@ final class CameraService: NSObject, ObservableObject {
         updatePhotoCounts()
         refreshPhotoPresentation()
 #if DEBUG
-        let timing = intent.timing
-        timing.record("photo.queueWait", since: timing.startedAt, until: requestStart)
         request.timing = timing
         request.captureRequestedAt = requestStart
         photoReadinessTiming = timing
@@ -1531,8 +1466,18 @@ final class CameraService: NSObject, ObservableObject {
         // Responsive capture overlaps system capture/processing without opting into
         // automatic quality reduction under load.
         photoOutput.isFastCapturePrioritizationEnabled = false
+        // Recheck after each lens/preset change. Responsive capture requires zero
+        // shutter lag, so enable it first, only when the configured output supports it.
+        let zeroShutterLagEnabled = mode == .photo && photoOutput.isZeroShutterLagSupported
+        if photoOutput.isZeroShutterLagEnabled != zeroShutterLagEnabled {
+            photoOutput.isZeroShutterLagEnabled = zeroShutterLagEnabled
+        }
         photoOutput.isResponsiveCaptureEnabled = mode == .photo && photoOutput.isResponsiveCaptureSupported
         isResponsivePhotoCaptureEnabled = photoOutput.isResponsiveCaptureEnabled
+#if DEBUG
+        let timing = CaptureTiming(startedAt: CaptureTiming.now())
+        timing.event("photo.captureConfiguration mode=\(mode == .photo ? "photo" : "video") zeroShutterLagSupported=\(photoOutput.isZeroShutterLagSupported) zeroShutterLagEnabled=\(photoOutput.isZeroShutterLagEnabled) responsiveSupported=\(photoOutput.isResponsiveCaptureSupported) responsiveEnabled=\(photoOutput.isResponsiveCaptureEnabled)")
+#endif
         refreshPhotoReadiness()
         guard let dimensions = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
             Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
@@ -1664,8 +1609,20 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
 #endif
 
     private func photoErrorMessage(stage: String, error: Error) -> String {
-        let detail = error as NSError
-        return "Photo \(stage) failed: \(detail.localizedDescription) [\(detail.domain), code \(detail.code)]"
+        var details: [String] = []
+        var current: NSError? = error as NSError
+        var visited: Set<ObjectIdentifier> = []
+        // Bound traversal in case an underlying-error chain contains a cycle.
+        while let detail = current, details.count < 5,
+              visited.insert(ObjectIdentifier(detail)).inserted {
+            var message = "\(detail.localizedDescription) [\(detail.domain), code \(detail.code)]"
+            if let reason = detail.localizedFailureReason, !reason.isEmpty {
+                message += " Reason: \(reason)"
+            }
+            details.append(message)
+            current = detail.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return "Photo \(stage) failed: " + details.joined(separator: " Underlying: ")
     }
 
     nonisolated func photoOutput(
