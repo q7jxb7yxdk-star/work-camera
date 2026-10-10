@@ -1104,8 +1104,12 @@ private struct LibraryView: View {
         default: .library
         }
         self._tab = State(initialValue: initialTab)
+        self._hasShownGrid = State(initialValue: initialTab == .library || initialTab == .search)
+        self._hasShownCollections = State(initialValue: initialTab == .collections)
     }
     @State private var tab: Tab = .library
+    @State private var hasShownGrid = false
+    @State private var hasShownCollections = false
     @State private var appliedQuickActionID: UUID?
     @State private var filter: Filter = .all
     @State private var isSelecting = false
@@ -1113,8 +1117,6 @@ private struct LibraryView: View {
     @State private var selectionSharePayload: LibrarySharePayload?
     @State private var searchText = ""
     @State private var detailItem: MediaItem?
-    @State private var isGridPrepared = false
-    @State private var preparedGridThumbnails: [MediaItem: MediaThumbnailCache.Entry] = [:]
     @State private var showDeleteConfirmation = false
     @State private var deleteErrorMessage: String?
 
@@ -1162,25 +1164,39 @@ private struct LibraryView: View {
             VStack(spacing: 0) {
                 header(topInset: geometry.safeAreaInsets.top)
 
-                if tab == .collections {
-                    collections
-                } else if tab == .templates {
-                    templateList
-                } else {
-                    if tab == .search {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                            TextField("Search objects, text or filenames", text: $searchText)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
+                // Retain visited pages and their thumbnail/scroll state across tab changes.
+                ZStack(alignment: .top) {
+                    if hasShownGrid || tab == .library || tab == .search {
+                        VStack(spacing: 0) {
+                            if tab == .search {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "magnifyingglass")
+                                    TextField("Search objects, text or filenames", text: $searchText)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                }
+                                .padding(12)
+                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                                .padding()
+                                searchIndexStatus
+                            }
+                            grid
                         }
-                        .padding(12)
-                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                        .padding()
-                        searchIndexStatus
+                        .opacity(tab == .library || tab == .search ? 1 : 0)
+                        .allowsHitTesting(tab == .library || tab == .search)
+                        .accessibilityHidden(tab != .library && tab != .search)
                     }
-                    grid
+                    if hasShownCollections || tab == .collections {
+                        collections
+                            .opacity(tab == .collections ? 1 : 0)
+                            .allowsHitTesting(tab == .collections)
+                            .accessibilityHidden(tab != .collections)
+                    }
+                    if tab == .templates {
+                        templateList
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 bottomBar
             }
@@ -1207,6 +1223,10 @@ private struct LibraryView: View {
         .preferredColorScheme(nil)
         .onAppear {
             applyQuickAction()
+        }
+        .onChange(of: tab) { _, newTab in
+            if newTab == .library || newTab == .search { hasShownGrid = true }
+            if newTab == .collections { hasShownCollections = true }
         }
         .onChange(of: quickAction) { _, _ in applyQuickAction() }
         .sheet(item: $selectionSharePayload) { payload in
@@ -1477,87 +1497,50 @@ private struct LibraryView: View {
     }
 
     private var grid: some View {
-        GeometryReader { viewport in
-            let items = displayedItems
-            let tileWidth = max(1, (viewport.size.width - 8) / 5)
-            let visibleRows = max(1, Int(ceil(viewport.size.height / (tileWidth + 2))))
-            let initialItems = Array(items.prefix((visibleRows + 1) * 5))
-            let cachedThumbnails = Dictionary(uniqueKeysWithValues: initialItems.compactMap { item in
-                MediaThumbnailCache.shared.cached(for: item).map { (item, $0) }
-            })
-            let isPrepared = isGridPrepared || cachedThumbnails.count == initialItems.count
-
-            ScrollView {
-                if items.isEmpty {
-                    ContentUnavailableView(
-                        albumScope != nil ? "No Items in This Album" : store.items.isEmpty ? "No captures yet" : "No matching items",
-                        systemImage: "photo.on.rectangle",
-                        description: Text(albumScope != nil
-                                          ? "Select photos or videos in Library to add them to an album, or check the current filter."
-                                          : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
-                    )
-                    .padding(.top, 60)
-                } else if isPrepared {
-                    LazyVGrid(
-                        columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
-                        spacing: 2
-                    ) {
-                        ForEach(items) { item in
-                            Button {
-                                if isSelecting {
-                                    if !selectedIDs.insert(item.id).inserted {
-                                        selectedIDs.remove(item.id)
-                                    }
-                                } else {
-                                    detailItem = item
+        let items = displayedItems
+        return ScrollView {
+            if items.isEmpty {
+                ContentUnavailableView(
+                    albumScope != nil ? "No Items in This Album" : store.items.isEmpty ? "No captures yet" : "No matching items",
+                    systemImage: "photo.on.rectangle",
+                    description: Text(albumScope != nil
+                                      ? "Select photos or videos in Library to add them to an album, or check the current filter."
+                                      : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
+                )
+                .padding(.top, 60)
+            } else {
+                // Keep real cells mounted so each visible thumbnail can load independently.
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
+                    spacing: 2
+                ) {
+                    ForEach(items) { item in
+                        Button {
+                            if isSelecting {
+                                if !selectedIDs.insert(item.id).inserted {
+                                    selectedIDs.remove(item.id)
                                 }
-                            } label: {
-                                tile(for: item, preparedThumbnail: preparedGridThumbnails[item] ?? cachedThumbnails[item])
+                            } else {
+                                detailItem = item
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(item.filename)
-                            .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
+                        } label: {
+                            tile(for: item)
                         }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(item.filename)
+                        .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
                     }
-                } else {
-                    // Show the grid structure immediately while a missing first batch is prepared.
-                    LazyVGrid(
-                        columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
-                        spacing: 2
-                    ) {
-                        ForEach(0..<initialItems.count, id: \.self) { _ in
-                            Color.secondary.opacity(0.2)
-                                .aspectRatio(1, contentMode: .fit)
-                                .accessibilityHidden(true)
-                        }
-                    }
-                }
-            }
-            .scrollIndicators(.hidden)
-            .background(Color(uiColor: .systemBackground))
-            .foregroundStyle(.primary)
-            .task(id: initialItems) {
-                guard !isGridPrepared else { return }
-                let thumbnails: [MediaItem: MediaThumbnailCache.Entry]
-                if cachedThumbnails.count == initialItems.count {
-                    thumbnails = cachedThumbnails
-                } else {
-                    thumbnails = await MediaThumbnailCache.shared.loadBatch(initialItems)
-                }
-                guard !Task.isCancelled else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    preparedGridThumbnails = thumbnails
-                    isGridPrepared = true
                 }
             }
         }
+        .scrollIndicators(.hidden)
+        .background(Color(uiColor: .systemBackground))
+        .foregroundStyle(.primary)
     }
 
-    private func tile(for item: MediaItem, preparedThumbnail: MediaThumbnailCache.Entry?) -> some View {
+    private func tile(for item: MediaItem) -> some View {
         GeometryReader { geometry in
-            MediaThumbnail(item: item, preparedThumbnail: preparedThumbnail)
+            MediaThumbnail(item: item)
                 .frame(width: geometry.size.width, height: geometry.size.height)
                 .clipped()
                 .overlay(alignment: .bottomTrailing) {
@@ -3847,16 +3830,9 @@ private struct CollectionThumbnail: View {
 
 private struct MediaThumbnail: View {
     let item: MediaItem
-    let preparedThumbnail: MediaThumbnailCache.Entry?
     @State private var loadedThumbnail: MediaThumbnailCache.Entry?
 
-    init(item: MediaItem, preparedThumbnail: MediaThumbnailCache.Entry? = nil) {
-        self.item = item
-        self.preparedThumbnail = preparedThumbnail
-    }
-
     private var thumbnail: MediaThumbnailCache.Entry? {
-        if let preparedThumbnail, preparedThumbnail.item == item { return preparedThumbnail }
         if let loadedThumbnail, loadedThumbnail.item == item { return loadedThumbnail }
         return MediaThumbnailCache.shared.cached(for: item)
     }
@@ -3872,10 +3848,24 @@ private struct MediaThumbnail: View {
             }
         }
         .task(id: item) {
-            if let preparedThumbnail, preparedThumbnail.item == item { return }
-            let entry = await MediaThumbnailCache.shared.load(item)
-            guard !Task.isCancelled else { return }
-            loadedThumbnail = entry
+            if let loadedThumbnail, loadedThumbnail.item == item, loadedThumbnail.image != nil { return }
+            // Retry transient decoding failures without requiring a Library re-entry.
+            // Limit retries so an unreadable source cannot trigger an endless loop.
+            for attempt in 0..<3 {
+                guard !Task.isCancelled else { return }
+                let entry = await MediaThumbnailCache.shared.load(item)
+                guard !Task.isCancelled else { return }
+                if entry.image != nil {
+                    loadedThumbnail = entry
+                    return
+                }
+                guard attempt < 2 else { return }
+                do {
+                    try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+                } catch {
+                    return
+                }
+            }
         }
     }
 }

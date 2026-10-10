@@ -251,12 +251,9 @@ final class MediaThumbnailCache {
         guard reconciledItems == nil || currentItems[item.url] == item else {
             return Entry(item: item, image: nil, size: size)
         }
-        let cost: Int
-        if let image = entry.image?.cgImage {
-            cost = image.bytesPerRow * image.height
-        } else {
-            cost = 1
-        }
+        // Failed decoding is transient state, not a reusable thumbnail result.
+        guard let image = entry.image else { return entry }
+        let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 1
         switch size {
         case .grid: images.setObject(entry, forKey: item.url as NSURL, cost: cost)
         case .collection:
