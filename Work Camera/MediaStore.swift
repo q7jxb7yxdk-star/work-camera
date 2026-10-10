@@ -11,7 +11,7 @@ import OSLog
 // Detached jobs explicitly inherit this context; no image content or paths are logged.
 nonisolated struct CaptureTiming: Sendable {
     // Central switch for all capture timing diagnostics. Rebuild after changing it.
-    static let isEnabled = true
+    static let isEnabled = false
     @TaskLocal static var current: CaptureTiming?
     private static let logger = Logger(subsystem: "WorkCamera", category: "CaptureTiming")
     let id = UUID().uuidString

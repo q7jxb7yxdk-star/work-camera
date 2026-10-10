@@ -27,6 +27,27 @@ nonisolated private final class CameraSessionRequestState: @unchecked Sendable {
 
 @MainActor
 final class CameraService: NSObject, ObservableObject {
+    enum PhotoQuality: String, CaseIterable {
+        case quality
+        case balanced
+        case speed
+
+        var title: String {
+            switch self {
+            case .quality: "Quality"
+            case .balanced: "Balanced"
+            case .speed: "Speed"
+            }
+        }
+        var prioritization: AVCapturePhotoOutput.QualityPrioritization {
+            switch self {
+            case .quality: .quality
+            case .balanced: .balanced
+            case .speed: .speed
+            }
+        }
+    }
+
     enum Mode: Hashable {
         case photo
         case video
@@ -54,13 +75,16 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var isResponsivePhotoCaptureEnabled = false
     @Published private(set) var photoCaptureReadiness: AVCapturePhotoOutput.CaptureReadiness = .sessionNotRunning
 
-    // Accept taps only after the previous photo finishes processing/saving,
-    // and only when capture can be submitted immediately; never queue them.
+    // Bound capture/processing/storage memory while allowing supported captures
+    // to overlap. A free slot alone never authorizes a delayed shutter request.
+    private var photoCaptureLimit: Int { isResponsivePhotoCaptureEnabled ? 2 : 1 }
+
+    // Accept only when capture can be submitted immediately; never queue taps.
     var canAcceptPhoto: Bool {
         mode == .photo && isReady && wantsRunning && !sessionStartPending && !isRecording &&
         UIApplication.shared.applicationState == .active &&
         session.isRunning && !session.isInterrupted &&
-        pendingPhotoCount == 0 &&
+        pendingPhotoCount < photoCaptureLimit &&
         photoCaptureReadiness == .ready && photoOutput.captureReadiness == .ready
     }
 
@@ -376,7 +400,7 @@ final class CameraService: NSObject, ObservableObject {
     private var photoRequests: [Int64: PhotoRequest] = [:]
     private var photoRequestOrder: [Int64] = []
     private var photoProcessingTask: Task<Void, Never>?
-    private var photoReadinessObservation: NSKeyValueObservation?
+    private var photoReadinessCoordinator: AVCapturePhotoOutputReadinessCoordinator?
     private var completedPhotoStates: [ProcessingState] = []
     private var photoCompletionTask: Task<Void, Never>?
 
@@ -384,7 +408,7 @@ final class CameraService: NSObject, ObservableObject {
     // Keep the latest trace after storage finishes to observe a delayed readiness
     // recovery. Times use monotonic uptime; no image content or location is logged.
     private var photoReadinessTiming: CaptureTiming?
-    private var lastObservedPhotoReadiness: AVCapturePhotoOutput.CaptureReadiness?
+    private var photoReadinessSampleTask: Task<Void, Never>?
     private var lastPhotoShutterAvailable: Bool?
     private var lastPhotoReadinessPendingCount: Int?
 
@@ -404,13 +428,44 @@ final class CameraService: NSObject, ObservableObject {
         at eventTime: TimeInterval
     ) {
         guard let timing = photoReadinessTiming, eventTime >= timing.startedAt else { return }
-        guard lastObservedPhotoReadiness != readiness else { return }
-        lastObservedPhotoReadiness = readiness
-        // The KVO value/time is captured at notification delivery; pending is the
-        // count when this event reaches the main actor, not the notification queue.
-        timing.event("photo.readiness state=\(photoReadinessName(readiness)) pendingAtMain=\(pendingPhotoCount) responsive=\(isResponsivePhotoCaptureEnabled)")
+        timing.event("photo.readiness source=coordinator state=\(photoReadinessName(readiness)) live=\(photoReadinessName(photoOutput.captureReadiness)) pending=\(pendingPhotoCount) responsive=\(photoOutput.isResponsiveCaptureEnabled)")
         timing.record("photo.requestToReadiness.\(photoReadinessName(readiness))", since: timing.startedAt, until: eventTime)
-        timing.record("photo.readinessMainWait", since: eventTime)
+        timing.record("photo.readinessHandlerWork", since: eventTime)
+    }
+
+    // Observe only: sampling must never refresh published readiness or enable the
+    // shutter. Bound it to four seconds per latest request and log changes/gaps.
+    private func startPhotoReadinessSampling(timing: CaptureTiming) {
+        photoReadinessSampleTask?.cancel()
+        guard CaptureTiming.isEnabled else { return }
+        photoReadinessSampleTask = Task { @MainActor [weak self] in
+            var previousSampleTime = CaptureTiming.now()
+            var previousState: String?
+            timing.event("photo.readinessSample.begin interval=20ms durationLimit=4000ms")
+            for _ in 0..<200 {
+                do { try await Task.sleep(nanoseconds: 20_000_000) }
+                catch { return }
+                guard let self else { return }
+                let now = CaptureTiming.now()
+                guard now - timing.startedAt <= 4 else {
+                    timing.event("photo.readinessSample.end reason=timeout")
+                    return
+                }
+                let gap = (now - previousSampleTime) * 1_000
+                previousSampleTime = now
+                let live = self.photoOutput.captureReadiness
+                let state = "published=\(self.photoReadinessName(self.photoCaptureReadiness)) coordinator=\(self.photoReadinessName(self.photoReadinessCoordinator?.captureReadiness ?? live)) live=\(self.photoReadinessName(live)) pending=\(self.pendingPhotoCount) available=\(self.canAcceptPhoto) responsive=\(self.photoOutput.isResponsiveCaptureEnabled) fastCapture=\(self.photoOutput.isFastCapturePrioritizationEnabled)"
+                if state != previousState || gap > 100 {
+                    timing.event("photo.readinessSample \(state) elapsedMs=\(String(format: "%.1f", (now - timing.startedAt) * 1_000)) gapMs=\(String(format: "%.1f", gap))")
+                    previousState = state
+                }
+                if self.pendingPhotoCount == 0 && live == .ready {
+                    timing.event("photo.readinessSample.end reason=finished")
+                    return
+                }
+            }
+            timing.event("photo.readinessSample.end reason=sampleLimit")
+        }
     }
 
     private func recordPhotoShutterAvailability(source: String) {
@@ -421,17 +476,17 @@ final class CameraService: NSObject, ObservableObject {
         guard availabilityChanged || lastPhotoReadinessPendingCount != pendingPhotoCount else { return }
         lastPhotoShutterAvailable = available
         lastPhotoReadinessPendingCount = pendingPhotoCount
-        timing.event("photo.shutterAvailability available=\(available) published=\(photoReadinessName(photoCaptureReadiness)) live=\(photoReadinessName(liveReadiness)) pending=\(pendingPhotoCount) captureLimit=1 sessionReady=\(isReady) mode=\(mode == .photo ? "photo" : "video") recording=\(isRecording) source=\(source)")
+        timing.event("photo.shutterAvailability available=\(available) published=\(photoReadinessName(photoCaptureReadiness)) live=\(photoReadinessName(liveReadiness)) pending=\(pendingPhotoCount) captureLimit=\(photoCaptureLimit) sessionReady=\(isReady) mode=\(mode == .photo ? "photo" : "video") recording=\(isRecording) source=\(source)")
         if availabilityChanged {
             timing.record("photo.requestToShutter.\(available ? "available" : "blocked")", since: timing.startedAt)
         }
     }
 #endif
 
-    private func refreshPhotoReadiness() {
-        photoCaptureReadiness = photoOutput.captureReadiness
+    private func refreshPhotoReadiness(source: String) {
+        photoCaptureReadiness = photoReadinessCoordinator?.captureReadiness ?? photoOutput.captureReadiness
 #if DEBUG
-        recordPhotoShutterAvailability(source: "refresh")
+        recordPhotoShutterAvailability(source: source)
 #endif
     }
 
@@ -476,7 +531,7 @@ final class CameraService: NSObject, ObservableObject {
                     // Bound presentation backlog independently of photo storage.
                     self.completedPhotoStates = Array((self.completedPhotoStates + [request.state]).suffix(2))
                 }
-                self.refreshPhotoReadiness()
+                self.refreshPhotoReadiness(source: "requestRetired")
                 self.refreshPhotoPresentation()
             }
         }
@@ -489,26 +544,16 @@ final class CameraService: NSObject, ObservableObject {
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         observeSessionLifecycle()
-        photoReadinessObservation = photoOutput.observe(\.captureReadiness, options: [.initial, .new]) { [weak self] _, change in
-#if DEBUG
-            let eventTime = CaptureTiming.now()
-            let observedReadiness = change.newValue
-#endif
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-#if DEBUG
-                    if let observedReadiness {
-                        self?.recordObservedPhotoReadiness(observedReadiness, at: eventTime)
-                    }
-#endif
-                    self?.refreshPhotoReadiness()
-                }
-            }
-        }
+        let coordinator = AVCapturePhotoOutputReadinessCoordinator(photoOutput: photoOutput)
+        photoReadinessCoordinator = coordinator
+        coordinator.delegate = self
     }
 
     deinit {
         autoMacroTask?.cancel()
+#if DEBUG
+        photoReadinessSampleTask?.cancel()
+#endif
     }
 
     private func observeSessionLifecycle() {
@@ -572,7 +617,7 @@ final class CameraService: NSObject, ObservableObject {
             applyCameraControls(to: device, enabled: true)
             startAutoMacroMonitoring()
         }
-        refreshPhotoReadiness()
+        refreshPhotoReadiness(source: "sessionReadiness")
     }
 
     private func updateLocationTracking() {
@@ -727,15 +772,15 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    func takePhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) {
+    func takePhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool, quality: PhotoQuality) {
         // Recheck live readiness at the tap, even if the UI has not refreshed yet.
         guard canAcceptPhoto else { return }
-        _ = submitPhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: dateTimeStampEnabled)
-        refreshPhotoReadiness()
+        _ = submitPhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: dateTimeStampEnabled, quality: quality)
+        refreshPhotoReadiness(source: "afterSubmission")
     }
 
     // Snapshot capture settings and submit in the same main-actor turn as the tap.
-    private func submitPhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) -> Bool {
+    private func submitPhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool, quality: PhotoQuality) -> Bool {
 #if DEBUG
         let requestStart = CaptureTiming.now()
         let timing = CaptureTiming(startedAt: requestStart)
@@ -775,7 +820,7 @@ final class CameraService: NSObject, ObservableObject {
         }
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
-        settings.photoQualityPrioritization = .quality
+        settings.photoQualityPrioritization = quality.prioritization
         if supportedFlashModes.contains(flashMode) { settings.flashMode = flashMode }
         if !shutterSoundEnabled && photoOutput.isShutterSoundSuppressionSupported {
             settings.isShutterSoundSuppressionEnabled = true
@@ -794,12 +839,13 @@ final class CameraService: NSObject, ObservableObject {
         request.timing = timing
         request.captureRequestedAt = requestStart
         photoReadinessTiming = timing
-        lastObservedPhotoReadiness = nil
         lastPhotoShutterAvailable = nil
         lastPhotoReadinessPendingCount = nil
-        timing.event("photo.request dimensions=\(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) quality=quality stamp=\(dateTimeStampEnabled) requestID=\(settings.uniqueID) pending=\(pendingPhotoCount) responsive=\(isResponsivePhotoCaptureEnabled)")
+        timing.event("photo.request dimensions=\(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) quality=\(quality.rawValue) stamp=\(dateTimeStampEnabled) requestID=\(settings.uniqueID) pending=\(pendingPhotoCount) responsive=\(isResponsivePhotoCaptureEnabled)")
         timing.record("photo.prepareRequest", since: requestStart)
+        startPhotoReadinessSampling(timing: timing)
 #endif
+        photoReadinessCoordinator?.startTrackingCaptureRequest(using: settings)
         photoOutput.capturePhoto(with: settings, delegate: self)
         return true
     }
@@ -1463,9 +1509,6 @@ final class CameraService: NSObject, ObservableObject {
     // Call inside session configuration, after selecting the input and preset.
     private func configurePhotoResolution(for device: AVCaptureDevice) {
         photoOutput.maxPhotoQualityPrioritization = .quality
-        // Responsive capture overlaps system capture/processing without opting into
-        // automatic quality reduction under load.
-        photoOutput.isFastCapturePrioritizationEnabled = false
         // Recheck after each lens/preset change. Responsive capture requires zero
         // shutter lag, so enable it first, only when the configured output supports it.
         let zeroShutterLagEnabled = mode == .photo && photoOutput.isZeroShutterLagSupported
@@ -1474,11 +1517,14 @@ final class CameraService: NSObject, ObservableObject {
         }
         photoOutput.isResponsiveCaptureEnabled = mode == .photo && photoOutput.isResponsiveCaptureSupported
         isResponsivePhotoCaptureEnabled = photoOutput.isResponsiveCaptureEnabled
+        // Recheck support for the current lens/preset before enabling adaptive
+        // processing for rapid captures. Each shot uses the user's selected priority.
+        photoOutput.isFastCapturePrioritizationEnabled = mode == .photo && photoOutput.isFastCapturePrioritizationSupported
 #if DEBUG
         let timing = CaptureTiming(startedAt: CaptureTiming.now())
-        timing.event("photo.captureConfiguration mode=\(mode == .photo ? "photo" : "video") zeroShutterLagSupported=\(photoOutput.isZeroShutterLagSupported) zeroShutterLagEnabled=\(photoOutput.isZeroShutterLagEnabled) responsiveSupported=\(photoOutput.isResponsiveCaptureSupported) responsiveEnabled=\(photoOutput.isResponsiveCaptureEnabled)")
+        timing.event("photo.captureConfiguration mode=\(mode == .photo ? "photo" : "video") zeroShutterLagSupported=\(photoOutput.isZeroShutterLagSupported) zeroShutterLagEnabled=\(photoOutput.isZeroShutterLagEnabled) responsiveSupported=\(photoOutput.isResponsiveCaptureSupported) responsiveEnabled=\(photoOutput.isResponsiveCaptureEnabled) fastCaptureSupported=\(photoOutput.isFastCapturePrioritizationSupported) fastCaptureEnabled=\(photoOutput.isFastCapturePrioritizationEnabled)")
 #endif
-        refreshPhotoReadiness()
+        refreshPhotoReadiness(source: "configuration")
         guard let dimensions = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
             Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
         }) else { return }
@@ -1492,17 +1538,20 @@ final class CameraService: NSObject, ObservableObject {
     private func preparePhotoCaptureResources() {
         guard mode == .photo,
               photoOutput.availablePhotoCodecTypes.contains(.hevc) else { return }
-        // Prepare before the shutter is pressed, including after a lens/preset change.
-        // The preparation object must never be reused for an actual capture.
-        let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
-        settings.photoQualityPrioritization = .quality
+        // Prepare all selectable priorities before the shutter is pressed, including
+        // after a lens/preset change. Actual captures always get fresh settings.
+        let preparedSettings = PhotoQuality.allCases.map { quality in
+            let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+            settings.photoQualityPrioritization = quality.prioritization
+            return settings
+        }
 #if DEBUG
         let timing = CaptureTiming(startedAt: CaptureTiming.now())
-        timing.event("photo.prepareResources.request dimensions=\(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) quality=quality")
+        timing.event("photo.prepareResources.request dimensions=\(photoOutput.maxPhotoDimensions.width)x\(photoOutput.maxPhotoDimensions.height) quality=quality,balanced,speed")
 #endif
         // Preparation is optional: capture remains available if it fails or is pending.
-        photoOutput.setPreparedPhotoSettingsArray([settings], completionHandler: { prepared, error in
+        photoOutput.setPreparedPhotoSettingsArray(preparedSettings, completionHandler: { prepared, error in
 #if DEBUG
             timing.record("photo.prepareResources", since: timing.startedAt)
             timing.event("photo.prepareResources.result prepared=\(prepared) error=\(error != nil)")
@@ -1544,6 +1593,25 @@ final class CameraService: NSObject, ObservableObject {
         if mode == .video { configureVideoResolution(for: camera) }
         configurePhotoResolution(for: camera)
         isConfigured = true
+    }
+}
+
+extension CameraService: AVCapturePhotoOutputReadinessCoordinatorDelegate {
+    nonisolated func readinessCoordinator(
+        _ coordinator: AVCapturePhotoOutputReadinessCoordinator,
+        captureReadinessDidChange captureReadiness: AVCapturePhotoOutput.CaptureReadiness
+    ) {
+        // AVFoundation guarantees this delegate callback runs on the main queue.
+        MainActor.assumeIsolated {
+            guard coordinator === self.photoReadinessCoordinator else { return }
+#if DEBUG
+            self.recordObservedPhotoReadiness(captureReadiness, at: CaptureTiming.now())
+#endif
+            self.photoCaptureReadiness = captureReadiness
+#if DEBUG
+            self.recordPhotoShutterAvailability(source: "coordinator")
+#endif
+        }
     }
 }
 

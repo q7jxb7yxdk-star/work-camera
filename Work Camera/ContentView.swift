@@ -16,6 +16,7 @@ struct ContentView: View {
         case grid
         case shutterSound
         case dateTimeStamp
+        case photoQuality
     }
 
     @ObservedObject var navigation: CameraSceneNavigation
@@ -25,6 +26,7 @@ struct ContentView: View {
     @State private var showGrid = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
     @AppStorage("photoDateTimeStampEnabled") private var photoDateTimeStampEnabled = false
+    @AppStorage("photoQuality") private var photoQuality: CameraService.PhotoQuality = .balanced
     @State private var showCameraControls = false
     @State private var activeControl: CameraControl?
     @State private var timerSeconds = 0
@@ -721,6 +723,28 @@ struct ContentView: View {
             }
             .accessibilityLabel("Photo date and time stamp")
             .accessibilityValue(photoDateTimeStampEnabled ? "On" : "Off")
+
+            Button {
+                showCameraControls = false
+                activeControl = .photoQuality
+            } label: {
+                VStack(spacing: 10) {
+                    Image(systemName: "camera.aperture")
+                        .font(.system(size: 26, weight: .light))
+                        .frame(width: 68, height: 68)
+                        .background(.white.opacity(0.2), in: Circle())
+                    Text("PHOTO QUALITY")
+                        .font(.system(size: 13, weight: .regular))
+                        .tracking(1.5)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .rotationEffect(controlLabelAngle)
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
+            .accessibilityLabel("Photo quality")
+            .accessibilityValue(photoQuality.title)
         }
     }
 
@@ -729,7 +753,7 @@ struct ContentView: View {
             HStack {
                 Button {
                     activeControl = nil
-                    showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp
+                    showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp || control == .photoQuality
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 20, weight: .medium))
@@ -788,6 +812,19 @@ struct ContentView: View {
                     settingOption("Off", symbol: "calendar", selected: !photoDateTimeStampEnabled) {
                         photoDateTimeStampEnabled = false
                     }
+                case .photoQuality:
+                    settingOption("Quality", symbol: "camera.aperture", selected: photoQuality == .quality) {
+                        guard !camera.isBusy, !camera.isRecording, countdownRemaining == nil else { return }
+                        photoQuality = .quality
+                    }
+                    settingOption("Balanced", symbol: "speedometer", selected: photoQuality == .balanced) {
+                        guard !camera.isBusy, !camera.isRecording, countdownRemaining == nil else { return }
+                        photoQuality = .balanced
+                    }
+                    settingOption("Speed", symbol: "bolt.fill", selected: photoQuality == .speed) {
+                        guard !camera.isBusy, !camera.isRecording, countdownRemaining == nil else { return }
+                        photoQuality = .speed
+                    }
                 case .shutterSound:
                     settingOption("On", symbol: "speaker.wave.2.fill",
                                   selected: camera.canSuppressShutterSound && shutterSoundEnabled) {
@@ -800,6 +837,7 @@ struct ContentView: View {
                 }
             }
             .disabled(control == .shutterSound && !camera.canSuppressShutterSound)
+            .disabled(control == .photoQuality && (camera.isBusy || camera.isRecording || countdownRemaining != nil))
             .disabled(camera.mode == .video && (!camera.isReady || camera.isBusy || camera.isRecording ||
                       (control == .exposure && !camera.canAdjustExposure)))
             .frame(height: 56)
@@ -821,7 +859,7 @@ struct ContentView: View {
         })
         .accessibilityAction(.escape) {
             activeControl = nil
-            showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp
+            showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp || control == .photoQuality
         }
     }
 
@@ -832,6 +870,7 @@ struct ContentView: View {
         case .timer: "TIMER"
         case .grid: "GRID"
         case .dateTimeStamp: "DATE & TIME"
+        case .photoQuality: "PHOTO QUALITY"
         case .shutterSound: "SHUTTER SOUND"
         }
     }
@@ -843,6 +882,7 @@ struct ContentView: View {
         case .timer: timerSeconds == 0 ? "Off" : "\(timerSeconds)s"
         case .grid: showGrid ? "On" : "Off"
         case .dateTimeStamp: photoDateTimeStampEnabled ? "On" : "Off"
+        case .photoQuality: photoQuality.title
         case .shutterSound: camera.canSuppressShutterSound ? (shutterSoundEnabled ? "On" : "Off") : "Unavailable"
         }
     }
@@ -927,13 +967,14 @@ struct ContentView: View {
         } else if timerSeconds > 0 {
             startCountdown()
         } else {
-            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled)
+            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled, quality: photoQuality)
         }
     }
 
     private func startCountdown() {
         guard camera.canAcceptPhoto else { return }
         let delaySeconds = timerSeconds
+        let captureQuality = photoQuality
         let id = UUID()
         countdownID = id
         countdownTask = Task { @MainActor in
@@ -955,7 +996,7 @@ struct ContentView: View {
                 camera.errorMessage = "The camera is not ready to take a photo. Please try again."
                 return
             }
-            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled)
+            camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled, quality: captureQuality)
         }
     }
 
