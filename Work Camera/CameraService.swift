@@ -74,6 +74,26 @@ final class CameraService: NSObject, ObservableObject {
     @Published private(set) var pendingPhotoCount = 0
     @Published private(set) var isResponsivePhotoCaptureEnabled = false
     @Published private(set) var photoCaptureReadiness: AVCapturePhotoOutput.CaptureReadiness = .sessionNotRunning
+    @Published private var supportedPhotoCaptureDimensions: [CMVideoDimensions] = []
+
+    // The label, capture request, and prepared resources share the same policy.
+    // These are requested dimensions; AVFoundation may deliver a smaller photo.
+    private func photoCaptureDimensions(for quality: PhotoQuality) -> CMVideoDimensions? {
+        supportedPhotoCaptureDimensions.last { dimensions in
+            let pixels = Int64(dimensions.width) * Int64(dimensions.height)
+            switch quality {
+            case .speed: return pixels < 13_000_000
+            case .balanced: return pixels < 13_000_000 || pixels >= 48_000_000
+            case .quality: return true
+            }
+        }
+    }
+
+    func photoResolutionMegapixels(for quality: PhotoQuality) -> Int? {
+        guard let dimensions = photoCaptureDimensions(for: quality) else { return nil }
+        // Keep whole megapixels so a 48.77 MP capture is labeled 48, not 49.
+        return Int(Int64(dimensions.width) * Int64(dimensions.height) / 1_000_000)
+    }
 
     // Bound capture/processing/storage memory while allowing supported captures
     // to overlap. A free slot alone never authorizes a delayed shutter request.
@@ -819,7 +839,11 @@ final class CameraService: NSObject, ObservableObject {
             }
         }
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+        guard let dimensions = photoCaptureDimensions(for: quality) else {
+            errorMessage = "This camera does not support the selected photo quality."
+            return false
+        }
+        settings.maxPhotoDimensions = dimensions
         settings.photoQualityPrioritization = quality.prioritization
         if supportedFlashModes.contains(flashMode) { settings.flashMode = flashMode }
         if !shutterSoundEnabled && photoOutput.isShutterSoundSuppressionSupported {
@@ -1525,9 +1549,12 @@ final class CameraService: NSObject, ObservableObject {
         timing.event("photo.captureConfiguration mode=\(mode == .photo ? "photo" : "video") zeroShutterLagSupported=\(photoOutput.isZeroShutterLagSupported) zeroShutterLagEnabled=\(photoOutput.isZeroShutterLagEnabled) responsiveSupported=\(photoOutput.isResponsiveCaptureSupported) responsiveEnabled=\(photoOutput.isResponsiveCaptureEnabled) fastCaptureSupported=\(photoOutput.isFastCapturePrioritizationSupported) fastCaptureEnabled=\(photoOutput.isFastCapturePrioritizationEnabled)")
 #endif
         refreshPhotoReadiness(source: "configuration")
-        guard let dimensions = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
+        supportedPhotoCaptureDimensions = device.activeFormat.supportedMaxPhotoDimensions.filter {
+            $0.width > 0 && $0.height > 0
+        }.sorted {
             Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
-        }) else { return }
+        }
+        guard let dimensions = supportedPhotoCaptureDimensions.last else { return }
         let current = photoOutput.maxPhotoDimensions
         if current.width != dimensions.width || current.height != dimensions.height {
             photoOutput.maxPhotoDimensions = dimensions
@@ -1540,15 +1567,19 @@ final class CameraService: NSObject, ObservableObject {
               photoOutput.availablePhotoCodecTypes.contains(.hevc) else { return }
         // Prepare all selectable priorities before the shutter is pressed, including
         // after a lens/preset change. Actual captures always get fresh settings.
-        let preparedSettings = PhotoQuality.allCases.map { quality in
+        let preparedSettings = PhotoQuality.allCases.compactMap { quality -> AVCapturePhotoSettings? in
+            guard let dimensions = photoCaptureDimensions(for: quality) else { return nil }
             let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
-            settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+            settings.maxPhotoDimensions = dimensions
             settings.photoQualityPrioritization = quality.prioritization
             return settings
         }
 #if DEBUG
         let timing = CaptureTiming(startedAt: CaptureTiming.now())
-        timing.event("photo.prepareResources.request dimensions=\(photoOutput.maxPhotoDimensions.width)x\(photoOutput.maxPhotoDimensions.height) quality=quality,balanced,speed")
+        let preparedDimensions = preparedSettings.map {
+            "\($0.photoQualityPrioritization.rawValue):\($0.maxPhotoDimensions.width)x\($0.maxPhotoDimensions.height)"
+        }.joined(separator: ",")
+        timing.event("photo.prepareResources.request qualityDimensions=\(preparedDimensions)")
 #endif
         // Preparation is optional: capture remains available if it fails or is pending.
         photoOutput.setPreparedPhotoSettingsArray(preparedSettings, completionHandler: { prepared, error in

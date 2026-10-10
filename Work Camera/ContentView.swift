@@ -362,7 +362,8 @@ struct ContentView: View {
     }
 
     private func topControls() -> some View {
-        HStack(spacing: 0) {
+        let expectedMegapixels = camera.photoResolutionMegapixels(for: photoQuality)
+        return HStack(spacing: 0) {
             Button {
                 showCameraControls = false
                 activeControl = .flash
@@ -404,11 +405,20 @@ struct ContentView: View {
             .accessibilityLabel("Timer: \(timerSeconds == 0 ? "Off" : "\(timerSeconds) seconds")")
             .disabled(camera.mode != .photo || camera.isRecording || countdownRemaining != nil)
 
-            Text(camera.mode == .photo ? "HEIC" : "HEVC")
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 44, height: 44)
-                .rotationEffect(controlLabelAngle)
-                .accessibilityLabel(camera.mode == .photo ? "HEIC photo" : "HEVC video")
+            VStack(spacing: 0) {
+                Text(camera.mode == .photo ? "HEIC" : "HEVC")
+                    .font(.system(size: 13, weight: .medium))
+                if camera.mode == .photo, let megapixels = expectedMegapixels {
+                    Text("\(megapixels)")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .frame(width: 44, height: 44)
+            .rotationEffect(controlLabelAngle)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(camera.mode == .photo
+                ? expectedMegapixels.map { "HEIC photo, expected \($0) megapixels" } ?? "HEIC photo"
+                : "HEVC video")
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
