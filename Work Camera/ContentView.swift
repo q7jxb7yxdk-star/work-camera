@@ -73,15 +73,10 @@ struct ContentView: View {
             guard !didPrepareRoot else { return }
             didPrepareRoot = true
             camera.onPhoto = { data in
-                do { try store.savePhoto(data) }
-                catch { errorMessage = error.localizedDescription }
+                try await store.saveCapturedPhoto(data)
             }
             camera.onVideo = { temporaryURL, captureDetails in
-                do { try store.saveVideo(from: temporaryURL, captureDetails: captureDetails) }
-                catch {
-                    try? FileManager.default.removeItem(at: temporaryURL)
-                    errorMessage = error.localizedDescription
-                }
+                try await store.saveVideo(from: temporaryURL, captureDetails: captureDetails)
             }
             do { try store.load() }
             catch { errorMessage = error.localizedDescription }
@@ -97,6 +92,7 @@ struct ContentView: View {
         .onChange(of: libraryFlowActive) { _, isPresented in
             if isPresented {
                 cancelCountdown()
+                camera.cancelQueuedPhotos()
                 showCameraControls = false
                 activeControl = nil
             }
@@ -107,7 +103,10 @@ struct ContentView: View {
             showCameraControls = false
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active { cancelCountdown() }
+            if newPhase != .active {
+                cancelCountdown()
+                camera.cancelQueuedPhotos()
+            }
             if newPhase == .background { camera.resetZoomOnNextStart() }
         }
         .task(id: shouldKeepScreenAwake) {
@@ -512,6 +511,15 @@ struct ContentView: View {
         Button { shutterTapped() } label: {
             ZStack {
                 Circle().strokeBorder(.white.opacity(0.35), lineWidth: 5).frame(width: 80, height: 80)
+                // Keep the light on for all accepted work, including queued photos.
+                // Completion presentation delays do not extend this indicator.
+                if camera.pendingPhotoCount > 0 || camera.isBusy {
+                    Circle()
+                        .strokeBorder(camera.mode == .video ? Color.red : Color.white, lineWidth: 5)
+                        .frame(width: 80, height: 80)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
                 if camera.isRecording {
                     RoundedRectangle(cornerRadius: 5).fill(.red).frame(width: 30, height: 30)
                 } else {
@@ -520,7 +528,8 @@ struct ContentView: View {
             }
         }
         .accessibilityLabel(countdownRemaining != nil ? "Cancel timer" : camera.isRecording ? "Stop recording" : camera.mode == .video ? "Record video" : "Take photo")
-        .disabled(!camera.isReady || camera.isBusy)
+        .accessibilityValue(camera.pendingPhotoCount > 0 ? "\(camera.pendingPhotoCount - camera.queuedPhotoCount) photos processing, \(camera.queuedPhotoCount) queued" : camera.isBusy ? "Processing video" : "")
+        .disabled(countdownRemaining == nil && (camera.mode == .photo ? !camera.canAcceptPhoto : (!camera.isReady || camera.isBusy)))
     }
 
     private var controlsButton: some View {
@@ -922,7 +931,7 @@ struct ContentView: View {
     }
 
     private func startCountdown() {
-        guard camera.isReady, !camera.isBusy else { return }
+        guard camera.canAcceptPhoto else { return }
         let delaySeconds = timerSeconds
         let id = UUID()
         countdownID = id
@@ -941,6 +950,10 @@ struct ContentView: View {
             countdownID = nil
             countdownRemaining = nil
             countdownTask = nil
+            guard camera.canAcceptPhoto else {
+                camera.errorMessage = "The camera is not ready to take a photo. Please try again."
+                return
+            }
             camera.takePhoto(shutterSoundEnabled: shutterSoundEnabled, dateTimeStampEnabled: photoDateTimeStampEnabled)
         }
     }
@@ -3441,11 +3454,20 @@ private struct MediaDetailView: View {
         if lens.contains("back triple camera") { return "Triple Camera" }
         if lens.contains("back ultra wide camera") { return "Ultra Wide Camera" }
         if lens.contains("back telephoto camera") { return "Telephoto Camera" }
-        // These LensModel values were confirmed against the physical capture device.
-        // A generic "back camera" name alone does not identify the lens.
-        // The lens string identifies the model even when movie make/model tags are absent.
-        if lens.hasPrefix("iphone 17 pro back camera ") {
-            let values = String(lens.dropFirst("iphone 17 pro back camera ".count))
+
+        // The device model is already displayed separately in Info.
+        // Keep the camera description for lens combinations not yet recognized.
+        var displayName = lensModel
+        if lens.hasPrefix("iphone "),
+           let cameraRange = lens.range(of: " back ") ?? lens.range(of: " front ") {
+            let prefixLength = lens.distance(from: lens.startIndex, to: cameraRange.lowerBound) + 1
+            displayName = String(lensModel.dropFirst(prefixLength))
+        }
+
+        // Match confirmed focal length/aperture combinations independently of model.
+        let camera = displayName.lowercased()
+        if camera.hasPrefix("back camera ") {
+            let values = String(camera.dropFirst("back camera ".count))
                 .components(separatedBy: "mm f/")
             if values.count == 2,
                let focalLength = Double(values[0]), let aperture = Double(values[1]),
@@ -3453,7 +3475,8 @@ private struct MediaDetailView: View {
                 if abs(focalLength - 2.22) < 0.01, abs(aperture - 2.2) < 0.01 {
                     return "Ultra Wide Camera"
                 }
-                if abs(focalLength - 6.765) < 0.01, abs(aperture - 1.78) < 0.01 {
+                if (abs(focalLength - 6.765) < 0.01 && abs(aperture - 1.78) < 0.01)
+                    || (abs(focalLength - 6.93) < 0.01 && abs(aperture - 1.48) < 0.01) {
                     return "Main Camera"
                 }
                 if abs(focalLength - 16.891) < 0.01, abs(aperture - 2.8) < 0.01 {
@@ -3461,7 +3484,7 @@ private struct MediaDetailView: View {
                 }
             }
         }
-        return lensModel
+        return displayName
     }
 
     private func metadataEntries(_ value: Any, path: String) -> [MetadataEntry] {

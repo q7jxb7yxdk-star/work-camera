@@ -32,9 +32,57 @@ final class CameraService: NSObject, ObservableObject {
         case video
     }
 
+    enum ProcessingStage: Double {
+        // These values mark workflow stages, not measured byte/time progress.
+        case capturing = 0.1
+        case processing = 0.5
+        case saving = 0.8
+        case completed = 1
+        case failed = 0
+    }
+
+    struct ProcessingState: Equatable {
+        let id: UUID
+        let mode: Mode
+        let startedAt = Date()
+        var stage: ProcessingStage
+        var completedAt: Date?
+    }
+
+    @Published private(set) var processingState: ProcessingState?
+    @Published private(set) var pendingPhotoCount = 0
+    @Published private(set) var queuedPhotoCount = 0
+    @Published private(set) var isResponsivePhotoCaptureEnabled = false
+    @Published private(set) var photoCaptureReadiness: AVCapturePhotoOutput.CaptureReadiness = .sessionNotRunning
+
+    // Availability to accept a tap is independent of hardware readiness.
+    var canAcceptPhoto: Bool {
+        mode == .photo && isReady && wantsRunning && !isRecording &&
+        UIApplication.shared.applicationState == .active &&
+        session.isRunning && !session.isInterrupted && pendingPhotoCount < 3
+    }
+
+    private func beginProcessing(mode: Mode) {
+        processingState = ProcessingState(id: UUID(), mode: mode, stage: .capturing)
+    }
+
+    private func updateProcessing(_ stage: ProcessingStage) {
+        guard var state = processingState else { return }
+        state.stage = stage
+        if stage == .completed { state.completedAt = Date() }
+        processingState = state
+    }
+
     let session = AVCaptureSession()
     @Published var mode: Mode = .photo {
         didSet {
+            if mode != .photo {
+                cancelQueuedPhotos()
+                photoCompletionTask?.cancel()
+                photoCompletionTask = nil
+                completedPhotoStates.removeAll()
+                processingState = nil
+            }
             updateCapturePreset()
             updateLocationTracking()
             resetAutoMacroDecision(cooldown: 2)
@@ -42,7 +90,13 @@ final class CameraService: NSObject, ObservableObject {
     }
     @Published private(set) var isAuthorized = false
     @Published private(set) var isCameraAccessDenied = false
-    @Published private(set) var isReady = false
+    @Published private(set) var isReady = false {
+        didSet {
+#if DEBUG
+            recordPhotoShutterAvailability(source: "sessionReadiness")
+#endif
+        }
+    }
     @Published private(set) var isRecording = false
     @Published private(set) var isBusy = false
     @Published private(set) var cameraPosition: AVCaptureDevice.Position = .back
@@ -142,8 +196,8 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
 
-    var onPhoto: ((Data) -> Void)?
-    var onVideo: ((URL, VideoCaptureDetails?) -> Void)?
+    var onPhoto: (@MainActor (Data) async throws -> Void)?
+    var onVideo: (@MainActor (URL, VideoCaptureDetails?) async throws -> Void)?
 
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -289,8 +343,194 @@ final class CameraService: NSObject, ObservableObject {
     private let autoMacroExitLensPositionCap: Float = 0.80
     private let locationManager = CLLocationManager()
     private var latestLocation: CLLocation?
-    private var photoLocation: CLLocation?
-    private var photoDateTimeText: String?
+    // Main-actor ownership; every request retains its own immutable shutter snapshots.
+    private final class PhotoRequest {
+        let location: CLLocation?
+        let dateTimeText: String?
+        var state = ProcessingState(id: UUID(), mode: .photo, stage: .capturing)
+        var input: PhotoFileDataInput?
+        var outputError: Error?
+        var captureError: Error?
+        var receivedOutput = false
+        var captureFinished = false
+#if DEBUG
+        var timing: CaptureTiming?
+        var captureRequestedAt: TimeInterval?
+        var exposureBeganAt: TimeInterval?
+        var exposureEndedAt: TimeInterval?
+        var outputCallbackTime: TimeInterval?
+#endif
+
+        init(location: CLLocation?, dateTimeText: String?) {
+            self.location = location
+            self.dateTimeText = dateTimeText
+        }
+    }
+
+    private struct PhotoCaptureIntent {
+        let shutterSoundEnabled: Bool
+        let dateTimeStampEnabled: Bool
+#if DEBUG
+        let timing = CaptureTiming(startedAt: CaptureTiming.now())
+#endif
+    }
+
+    private var queuedPhotoIntents: [PhotoCaptureIntent] = []
+    private var isSubmittingQueuedPhotos = false
+
+    private func updatePhotoCounts() {
+        queuedPhotoCount = queuedPhotoIntents.count
+        pendingPhotoCount = photoRequests.count + queuedPhotoCount
+        isBusy = pendingPhotoCount > 0
+    }
+
+    func cancelQueuedPhotos() {
+        guard !queuedPhotoIntents.isEmpty else { return }
+#if DEBUG
+        for intent in queuedPhotoIntents {
+            intent.timing.event("photo.queueCancelled")
+            intent.timing.record("photo.total.cancelledBeforeCapture", since: intent.timing.startedAt)
+        }
+#endif
+        queuedPhotoIntents.removeAll()
+        updatePhotoCounts()
+#if DEBUG
+        recordPhotoShutterAvailability(source: "queueCancelled")
+#endif
+    }
+
+    private func submitQueuedPhotosIfReady() {
+        guard !isSubmittingQueuedPhotos else { return }
+        isSubmittingQueuedPhotos = true
+        defer { isSubmittingQueuedPhotos = false }
+        while !queuedPhotoIntents.isEmpty,
+              wantsRunning, isReady, !sessionStartPending,
+              session.isRunning, !session.isInterrupted,
+              UIApplication.shared.applicationState == .active,
+              mode == .photo, !isRecording,
+              photoRequests.count < (isResponsivePhotoCaptureEnabled ? 2 : 1),
+              photoOutput.captureReadiness == .ready {
+            let intent = queuedPhotoIntents.removeFirst()
+            if !submitPhoto(intent) {
+#if DEBUG
+                intent.timing.event("photo.queueSubmissionFailed")
+                intent.timing.record("photo.total.failedBeforeCapture", since: intent.timing.startedAt)
+#endif
+            }
+            updatePhotoCounts()
+            refreshPhotoReadiness()
+        }
+    }
+
+    private var photoRequests: [Int64: PhotoRequest] = [:]
+    private var photoRequestOrder: [Int64] = []
+    private var photoProcessingTask: Task<Void, Never>?
+    private var photoReadinessObservation: NSKeyValueObservation?
+    private var completedPhotoStates: [ProcessingState] = []
+    private var photoCompletionTask: Task<Void, Never>?
+
+#if DEBUG
+    // Keep the latest trace after storage finishes to observe a delayed readiness
+    // recovery. Times use monotonic uptime; no image content or location is logged.
+    private var photoReadinessTiming: CaptureTiming?
+    private var lastObservedPhotoReadiness: AVCapturePhotoOutput.CaptureReadiness?
+    private var lastPhotoShutterAvailable: Bool?
+    private var lastPhotoReadinessPendingCount: Int?
+
+    private func photoReadinessName(_ readiness: AVCapturePhotoOutput.CaptureReadiness) -> String {
+        switch readiness {
+        case .sessionNotRunning: return "sessionNotRunning"
+        case .ready: return "ready"
+        case .notReadyMomentarily: return "notReadyMomentarily"
+        case .notReadyWaitingForCapture: return "notReadyWaitingForCapture"
+        case .notReadyWaitingForProcessing: return "notReadyWaitingForProcessing"
+        @unknown default: return "unknown(\(readiness.rawValue))"
+        }
+    }
+
+    private func recordObservedPhotoReadiness(
+        _ readiness: AVCapturePhotoOutput.CaptureReadiness,
+        at eventTime: TimeInterval
+    ) {
+        guard let timing = photoReadinessTiming, eventTime >= timing.startedAt else { return }
+        guard lastObservedPhotoReadiness != readiness else { return }
+        lastObservedPhotoReadiness = readiness
+        // The KVO value/time is captured at notification delivery; pending is the
+        // count when this event reaches the main actor, not the notification queue.
+        timing.event("photo.readiness state=\(photoReadinessName(readiness)) pendingAtMain=\(pendingPhotoCount) responsive=\(isResponsivePhotoCaptureEnabled)")
+        timing.record("photo.requestToReadiness.\(photoReadinessName(readiness))", since: timing.startedAt, until: eventTime)
+        timing.record("photo.readinessMainWait", since: eventTime)
+    }
+
+    private func recordPhotoShutterAvailability(source: String) {
+        guard let timing = photoReadinessTiming else { return }
+        let liveReadiness = photoOutput.captureReadiness
+        let available = canAcceptPhoto
+        let availabilityChanged = lastPhotoShutterAvailable != available
+        guard availabilityChanged || lastPhotoReadinessPendingCount != pendingPhotoCount else { return }
+        lastPhotoShutterAvailable = available
+        lastPhotoReadinessPendingCount = pendingPhotoCount
+        timing.event("photo.shutterAvailability available=\(available) published=\(photoReadinessName(photoCaptureReadiness)) live=\(photoReadinessName(liveReadiness)) pending=\(pendingPhotoCount) queued=\(queuedPhotoCount) limit=3 captureLimit=\(isResponsivePhotoCaptureEnabled ? 2 : 1) sessionReady=\(isReady) mode=\(mode == .photo ? "photo" : "video") recording=\(isRecording) source=\(source)")
+        if availabilityChanged {
+            timing.record("photo.requestToShutter.\(available ? "available" : "blocked")", since: timing.startedAt)
+        }
+    }
+#endif
+
+    private func refreshPhotoReadiness() {
+        photoCaptureReadiness = photoOutput.captureReadiness
+#if DEBUG
+        recordPhotoShutterAvailability(source: "refresh")
+#endif
+        submitQueuedPhotosIfReady()
+    }
+
+    private func refreshPhotoPresentation() {
+        guard mode == .photo, photoCompletionTask == nil else { return }
+        if !completedPhotoStates.isEmpty {
+            var state = completedPhotoStates.removeFirst()
+            // The completion hold is presentation time, independent of capture timing.
+            state.completedAt = Date()
+            processingState = state
+            photoCompletionTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: 650_000_000) }
+                catch { return }
+                guard let self else { return }
+                self.photoCompletionTask = nil
+                self.refreshPhotoPresentation()
+            }
+        } else {
+            processingState = photoRequestOrder.first.flatMap { photoRequests[$0]?.state }
+        }
+    }
+
+    private func setPhotoStage(_ stage: ProcessingStage, request: PhotoRequest) {
+        request.state.stage = stage
+        if stage == .completed { request.state.completedAt = Date() }
+        refreshPhotoPresentation()
+    }
+
+    private func drainPhotoRequests() {
+        guard photoProcessingTask == nil else { return }
+        photoProcessingTask = Task { @MainActor in
+            defer { self.photoProcessingTask = nil }
+            while let id = self.photoRequestOrder.first, let request = self.photoRequests[id] {
+                // Ordered main-queue delegate ingress ensures all output events precede
+                // the terminal event. Wait for it so capture failures cannot report success.
+                guard request.captureFinished else { return }
+                await self.processPhotoRequest(request)
+                self.photoRequests.removeValue(forKey: id)
+                self.photoRequestOrder.removeFirst()
+                self.updatePhotoCounts()
+                if request.state.stage == .completed {
+                    // Bound presentation backlog independently of photo storage.
+                    self.completedPhotoStates = Array((self.completedPhotoStates + [request.state]).suffix(2))
+                }
+                self.refreshPhotoReadiness()
+                self.refreshPhotoPresentation()
+            }
+        }
+    }
     private var videoCaptureDetails: VideoCaptureDetails?
     @Published private var hasRecordingStarted = false
 
@@ -299,6 +539,22 @@ final class CameraService: NSObject, ObservableObject {
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
         observeSessionLifecycle()
+        photoReadinessObservation = photoOutput.observe(\.captureReadiness, options: [.initial, .new]) { [weak self] _, change in
+#if DEBUG
+            let eventTime = CaptureTiming.now()
+            let observedReadiness = change.newValue
+#endif
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+#if DEBUG
+                    if let observedReadiness {
+                        self?.recordObservedPhotoReadiness(observedReadiness, at: eventTime)
+                    }
+#endif
+                    self?.refreshPhotoReadiness()
+                }
+            }
+        }
     }
 
     deinit {
@@ -311,9 +567,10 @@ final class CameraService: NSObject, ObservableObject {
             center.publisher(for: AVCaptureSession.wasInterruptedNotification, object: session)
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in
-                    Task { @MainActor [weak self] in
+                    MainActor.assumeIsolated {
                         guard let self else { return }
                         self.isReady = false
+                        self.cancelQueuedPhotos()
                         self.stopAutoMacroMonitoring()
                         if self.errorMessage == "Could not start the camera." {
                             self.errorMessage = nil
@@ -348,8 +605,9 @@ final class CameraService: NSObject, ObservableObject {
             center.publisher(for: AVCaptureSession.runtimeErrorNotification, object: session)
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] _ in
-                    Task { @MainActor [weak self] in
+                    MainActor.assumeIsolated {
                         self?.isReady = false
+                        self?.cancelQueuedPhotos()
                         self?.stopAutoMacroMonitoring()
                     }
                 }
@@ -366,6 +624,7 @@ final class CameraService: NSObject, ObservableObject {
             applyCameraControls(to: device, enabled: true)
             startAutoMacroMonitoring()
         }
+        refreshPhotoReadiness()
     }
 
     private func updateLocationTracking() {
@@ -469,6 +728,7 @@ final class CameraService: NSObject, ObservableObject {
 
     func stop() {
         wantsRunning = false
+        cancelQueuedPhotos()
         stopAutoMacroMonitoring()
         updateLocationTracking()
         guard !isRecording else {
@@ -521,31 +781,51 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func takePhoto(shutterSoundEnabled: Bool, dateTimeStampEnabled: Bool) {
-        guard isReady, !isBusy, !isRecording else { return }
+        guard canAcceptPhoto else { return }
+        let intent = PhotoCaptureIntent(
+            shutterSoundEnabled: shutterSoundEnabled,
+            dateTimeStampEnabled: dateTimeStampEnabled
+        )
+        queuedPhotoIntents.append(intent)
+        updatePhotoCounts()
+#if DEBUG
+        intent.timing.event("photo.queued pending=\(pendingPhotoCount) queued=\(queuedPhotoCount)")
+        recordPhotoShutterAvailability(source: "queueAccepted")
+#endif
+        refreshPhotoReadiness()
+    }
+
+    // Called synchronously only by the ready-gated FIFO pump. A fresh settings
+    // object and actual capture time/orientation/location are created here.
+    private func submitPhoto(_ intent: PhotoCaptureIntent) -> Bool {
+        let shutterSoundEnabled = intent.shutterSoundEnabled
+        let dateTimeStampEnabled = intent.dateTimeStampEnabled
+#if DEBUG
+        let requestStart = CaptureTiming.now()
+#endif
         guard videoInput?.device.isVirtualDevice == false else {
             errorMessage = "Virtual cameras are not allowed."
-            return
+            return false
         }
         guard photoOutput.availablePhotoCodecTypes.contains(.hevc) else {
             errorMessage = "This device does not support HEIC photo capture."
-            return
+            return false
         }
         guard let connection = photoOutput.connection(with: .video),
               let captureRotationCoordinator else {
             errorMessage = "The photo capture orientation is unavailable."
-            return
+            return false
         }
         // Capture follows the handset's physical orientation, independently of
         // the camera page's fixed portrait preview. PhotoOutput writes EXIF tags.
         let angle = captureRotationCoordinator.videoRotationAngleForHorizonLevelCapture
         guard connection.isVideoRotationAngleSupported(angle) else {
             errorMessage = "The photo capture orientation is unsupported."
-            return
+            return false
         }
         connection.videoRotationAngle = angle
-        isBusy = true
         // Snapshot the fix at the shutter, never attach a later or stale location.
-        photoLocation = nil
+        var photoLocation: CLLocation?
         if let location = latestLocation,
            locationManager.authorizationStatus == .authorizedWhenInUse ||
             locationManager.authorizationStatus == .authorizedAlways {
@@ -565,8 +845,28 @@ final class CameraService: NSObject, ObservableObject {
         }
         // Snapshot both the local time and the option at the actual shutter,
         // after any countdown, rather than when processing finishes.
-        photoDateTimeText = dateTimeStampEnabled ? PhotoDateTimeStamp.text(for: Date()) : nil
+        let request = PhotoRequest(
+            location: photoLocation,
+            dateTimeText: dateTimeStampEnabled ? PhotoDateTimeStamp.text(for: Date()) : nil
+        )
+        photoRequests[settings.uniqueID] = request
+        photoRequestOrder.append(settings.uniqueID)
+        updatePhotoCounts()
+        refreshPhotoPresentation()
+#if DEBUG
+        let timing = intent.timing
+        timing.record("photo.queueWait", since: timing.startedAt, until: requestStart)
+        request.timing = timing
+        request.captureRequestedAt = requestStart
+        photoReadinessTiming = timing
+        lastObservedPhotoReadiness = nil
+        lastPhotoShutterAvailable = nil
+        lastPhotoReadinessPendingCount = nil
+        timing.event("photo.request dimensions=\(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) quality=quality stamp=\(dateTimeStampEnabled) requestID=\(settings.uniqueID) pending=\(pendingPhotoCount) responsive=\(isResponsivePhotoCaptureEnabled)")
+        timing.record("photo.prepareRequest", since: requestStart)
+#endif
         photoOutput.capturePhoto(with: settings, delegate: self)
+        return true
     }
 
     func startRecording() {
@@ -613,8 +913,9 @@ final class CameraService: NSObject, ObservableObject {
     }
 
     func stopRecording() {
-        guard isRecording else { return }
+        guard isRecording, !isBusy else { return }
         isBusy = true
+        beginProcessing(mode: .video)
         movieOutput.stopRecording()
     }
 
@@ -1227,6 +1528,12 @@ final class CameraService: NSObject, ObservableObject {
     // Call inside session configuration, after selecting the input and preset.
     private func configurePhotoResolution(for device: AVCaptureDevice) {
         photoOutput.maxPhotoQualityPrioritization = .quality
+        // Responsive capture overlaps system capture/processing without opting into
+        // automatic quality reduction under load.
+        photoOutput.isFastCapturePrioritizationEnabled = false
+        photoOutput.isResponsiveCaptureEnabled = mode == .photo && photoOutput.isResponsiveCaptureSupported
+        isResponsivePhotoCaptureEnabled = photoOutput.isResponsiveCaptureEnabled
+        refreshPhotoReadiness()
         guard let dimensions = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
             Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
         }) else { return }
@@ -1234,6 +1541,28 @@ final class CameraService: NSObject, ObservableObject {
         if current.width != dimensions.width || current.height != dimensions.height {
             photoOutput.maxPhotoDimensions = dimensions
         }
+        preparePhotoCaptureResources()
+    }
+
+    private func preparePhotoCaptureResources() {
+        guard mode == .photo,
+              photoOutput.availablePhotoCodecTypes.contains(.hevc) else { return }
+        // Prepare before the shutter is pressed, including after a lens/preset change.
+        // The preparation object must never be reused for an actual capture.
+        let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
+        settings.photoQualityPrioritization = .quality
+#if DEBUG
+        let timing = CaptureTiming(startedAt: CaptureTiming.now())
+        timing.event("photo.prepareResources.request dimensions=\(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) quality=quality")
+#endif
+        // Preparation is optional: capture remains available if it fails or is pending.
+        photoOutput.setPreparedPhotoSettingsArray([settings], completionHandler: { prepared, error in
+#if DEBUG
+            timing.record("photo.prepareResources", since: timing.startedAt)
+            timing.event("photo.prepareResources.result prepared=\(prepared) error=\(error != nil)")
+#endif
+        })
     }
 
     private func configure(includeAudio: Bool) throws {
@@ -1274,6 +1603,66 @@ final class CameraService: NSObject, ObservableObject {
 }
 
 extension CameraService: AVCapturePhotoCaptureDelegate {
+#if DEBUG
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        willBeginCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings
+    ) {
+        let eventTime = CaptureTiming.now()
+        let requestID = resolvedSettings.uniqueID
+        let dimensions = resolvedSettings.photoDimensions
+        let range = resolvedSettings.photoProcessingTimeRange
+        let minimum = CMTimeGetSeconds(range.start) * 1_000
+        let maximum = CMTimeGetSeconds(CMTimeRangeGetEnd(range)) * 1_000
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let request = self.photoRequests[requestID], let timing = request.timing else { return }
+                timing.record("photo.requestToResolved", since: timing.startedAt, until: eventTime)
+                timing.event("photo.resolved dimensions=\(dimensions.width)x\(dimensions.height)")
+                if minimum.isFinite, maximum.isFinite {
+                    timing.event("photo.expectedProcessing min=\(String(format: "%.1f", minimum)) ms max=\(String(format: "%.1f", maximum)) ms")
+                } else {
+                    timing.event("photo.expectedProcessing unavailable")
+                }
+            }
+        }
+    }
+
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        willCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings
+    ) {
+        let eventTime = CaptureTiming.now()
+        let requestID = resolvedSettings.uniqueID
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let request = self.photoRequests[requestID], let timing = request.timing else { return }
+                request.exposureBeganAt = eventTime
+                timing.record("photo.requestToExposureStart", since: timing.startedAt, until: eventTime)
+            }
+        }
+    }
+
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didCapturePhotoFor resolvedSettings: AVCaptureResolvedPhotoSettings
+    ) {
+        let eventTime = CaptureTiming.now()
+        let requestID = resolvedSettings.uniqueID
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let request = self.photoRequests[requestID], let timing = request.timing else { return }
+                request.exposureEndedAt = eventTime
+                timing.record("photo.requestToExposureEnd", since: timing.startedAt, until: eventTime)
+                if let start = request.exposureBeganAt {
+                    // Delegate event interval, not the sensor's EXIF exposure duration.
+                    timing.record("photo.captureEventInterval", since: start, until: eventTime)
+                }
+            }
+        }
+    }
+#endif
+
     private func photoErrorMessage(stage: String, error: Error) -> String {
         let detail = error as NSError
         return "Photo \(stage) failed: \(detail.localizedDescription) [\(detail.domain), code \(detail.code)]"
@@ -1284,32 +1673,133 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
         didFinishProcessingPhoto photo: AVCapturePhoto,
         error: Error?
     ) {
-        Task { @MainActor in
-            defer {
-                self.photoLocation = nil
-                self.photoDateTimeText = nil
-                self.isBusy = false
-            }
-            var data: Data?
-            if error == nil, let location = self.photoLocation {
-                data = photo.fileDataRepresentation(with: PhotoMetadataCustomizer(location: location))
-            } else {
-                data = error == nil ? photo.fileDataRepresentation() : nil
-            }
-            if let originalData = data, let text = self.photoDateTimeText {
-                do {
-                    // Full-resolution rendering and HEIC encoding can be costly.
-                    data = try await Task.detached(priority: .userInitiated) {
-                        try PhotoDateTimeStamp.apply(to: originalData, text: text)
-                    }.value
-                } catch {
-                    self.errorMessage = self.photoErrorMessage(stage: "date and time stamp", error: error)
-                    return
+        let requestID = photo.resolvedSettings.uniqueID
+#if DEBUG
+        let callbackTime = CaptureTiming.now()
+#endif
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let request = self.photoRequests[requestID], !request.receivedOutput else { return }
+                request.receivedOutput = true
+                request.outputError = error
+                if error == nil { request.input = PhotoFileDataInput(photo: photo, location: request.location) }
+#if DEBUG
+                request.outputCallbackTime = callbackTime
+                if let timing = request.timing {
+                    timing.record("photo.cameraOutput", since: request.captureRequestedAt ?? timing.startedAt, until: callbackTime)
+                    timing.record("photo.callbackMainWait", since: callbackTime)
+                    if let exposureEnd = request.exposureEndedAt {
+                        timing.record("photo.exposureEndToOutput", since: exposureEnd, until: callbackTime)
+                    }
                 }
+#endif
+                self.setPhotoStage(.processing, request: request)
+                self.drainPhotoRequests()
             }
-            if let error { self.errorMessage = self.photoErrorMessage(stage: "capture processing", error: error) }
-            else if let data { self.onPhoto?(data) }
-            else { self.errorMessage = "The captured photo could not be converted to file data. Please try taking the photo again." }
+        }
+    }
+
+    nonisolated func photoOutput(
+        _ output: AVCapturePhotoOutput,
+        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
+        error: Error?
+    ) {
+        let requestID = resolvedSettings.uniqueID
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                guard let request = self.photoRequests[requestID] else { return }
+                request.captureFinished = true
+                request.captureError = error
+                self.drainPhotoRequests()
+            }
+        }
+    }
+
+    private func extractPhotoData(from request: PhotoRequest) async -> Data? {
+        guard let input = request.input else { return nil }
+#if DEBUG
+        let timing = request.timing
+#endif
+#if DEBUG
+        let representationStart = CaptureTiming.now()
+#endif
+        let data = await Task.detached(priority: .userInitiated) {
+#if DEBUG
+            let workerStart = CaptureTiming.now()
+            let result = input.fileData()
+            let workerEnd = CaptureTiming.now()
+            timing?.record("photo.fileDataWorkerWait", since: representationStart, until: workerStart)
+            timing?.record("photo.fileDataWork", since: workerStart, until: workerEnd)
+            return result
+#else
+            input.fileData()
+#endif
+        }.value
+        // Drop the request-owned reference before returning the extracted data.
+        request.input = nil
+#if DEBUG
+        timing?.record("photo.fileDataTotal", since: representationStart)
+        timing?.event("photo.data bytes=\(data?.count ?? 0)")
+#endif
+        return data
+    }
+
+    private func processPhotoRequest(_ request: PhotoRequest) async {
+#if DEBUG
+        let timing = request.timing
+        if let callbackTime = request.outputCallbackTime {
+            timing?.record("photo.appQueueWait", since: callbackTime)
+        }
+#endif
+        defer {
+            if request.state.stage != .completed { setPhotoStage(.failed, request: request) }
+#if DEBUG
+            let outcome = request.state.stage == .completed ? "success" : "failed"
+            timing?.record("photo.total.\(outcome)", since: timing?.startedAt ?? CaptureTiming.now())
+#endif
+        }
+        if let error = request.captureError ?? request.outputError {
+            errorMessage = photoErrorMessage(stage: "capture processing", error: error)
+            return
+        }
+        setPhotoStage(.processing, request: request)
+        var data = await extractPhotoData(from: request)
+        if let originalData = data, let text = request.dateTimeText {
+#if DEBUG
+            let stampStart = CaptureTiming.now()
+            defer { timing?.record("photo.dateTimeStamp", since: stampStart) }
+#endif
+            do {
+                data = try await Task.detached(priority: .userInitiated) {
+                    try PhotoDateTimeStamp.apply(to: originalData, text: text)
+                }.value
+            } catch {
+                errorMessage = photoErrorMessage(stage: "date and time stamp", error: error)
+                return
+            }
+        }
+        guard let data else {
+            errorMessage = "The captured photo could not be converted to file data. Please try taking the photo again."
+            return
+        }
+        guard let savePhoto = onPhoto else {
+            errorMessage = "Photo saving is unavailable. Please try taking the photo again."
+            return
+        }
+        setPhotoStage(.saving, request: request)
+#if DEBUG
+        let saveStart = CaptureTiming.now()
+        defer { timing?.record("photo.saveCallback", since: saveStart) }
+#endif
+        do {
+#if DEBUG
+            try await CaptureTiming.$current.withValue(timing) { try await savePhoto(data) }
+#else
+            try await savePhoto(data)
+#endif
+            setPhotoStage(.completed, request: request)
+        } catch {
+            errorMessage = photoErrorMessage(stage: "save", error: error)
         }
     }
 }
@@ -1328,6 +1818,27 @@ extension CameraService: CLLocationManagerDelegate {
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         Task { @MainActor in self.latestLocation = nil }
+    }
+}
+
+// AVCapturePhoto and CLLocation are immutable snapshots. This wrapper is consumed
+// by one background job; it never reads mutable CameraService or UI state.
+nonisolated private final class PhotoFileDataInput: @unchecked Sendable {
+    private let photo: AVCapturePhoto
+    private let location: CLLocation?
+
+    init(photo: AVCapturePhoto, location: CLLocation?) {
+        self.photo = photo
+        self.location = location
+    }
+
+    func fileData() -> Data? {
+        autoreleasepool {
+            if let location {
+                return photo.fileDataRepresentation(with: PhotoMetadataCustomizer(location: location))
+            }
+            return photo.fileDataRepresentation()
+        }
     }
 }
 
@@ -1383,16 +1894,38 @@ extension CameraService: AVCaptureFileOutputRecordingDelegate {
         error: Error?
     ) {
         Task { @MainActor in
+            // Keep processing active through the asynchronous library save callback,
+            // including recordings that finish without an explicit stop request.
+            if !self.isBusy { self.beginProcessing(mode: .video) }
+            self.isBusy = true
+            defer {
+                self.isBusy = false
+                if self.processingState?.stage != .completed {
+                    self.updateProcessing(.failed)
+                }
+            }
+            self.updateProcessing(.processing)
             self.hasRecordingStarted = false
             self.isRecording = false
-            self.isBusy = false
             let captureDetails = self.videoCaptureDetails
             self.videoCaptureDetails = nil
             // AVFoundation can report a stop condition while still finishing a valid file.
             let recordedSuccessfully = error == nil ||
                 ((error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? NSNumber)?.boolValue == true
             if recordedSuccessfully {
-                self.onVideo?(outputFileURL, captureDetails)
+                guard let saveVideo = self.onVideo else {
+                    try? FileManager.default.removeItem(at: outputFileURL)
+                    self.errorMessage = "Video saving is unavailable. Please try recording again."
+                    return
+                }
+                self.updateProcessing(.saving)
+                do {
+                    try await saveVideo(outputFileURL, captureDetails)
+                    self.updateProcessing(.completed)
+                } catch {
+                    try? FileManager.default.removeItem(at: outputFileURL)
+                    self.errorMessage = error.localizedDescription
+                }
             } else {
                 try? FileManager.default.removeItem(at: outputFileURL)
                 self.errorMessage = error?.localizedDescription ?? "The video could not be recorded."

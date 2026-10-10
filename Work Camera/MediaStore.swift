@@ -4,6 +4,36 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+#if DEBUG
+import OSLog
+
+// Task-local context keeps one ID across camera callbacks, actor hops and storage.
+// Detached jobs explicitly inherit this context; no image content or paths are logged.
+nonisolated struct CaptureTiming: Sendable {
+    // Central switch for all capture timing diagnostics. Rebuild after changing it.
+    static let isEnabled = true
+    @TaskLocal static var current: CaptureTiming?
+    private static let logger = Logger(subsystem: "WorkCamera", category: "CaptureTiming")
+    let id = UUID().uuidString
+    let startedAt: TimeInterval
+
+    static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    func record(_ stage: String, since start: TimeInterval, until end: TimeInterval? = nil) {
+        guard Self.isEnabled else { return }
+        let milliseconds = max(0, (end ?? Self.now()) - start) * 1_000
+        let message = "[CaptureTiming][\(id)] \(stage): \(String(format: "%.1f", milliseconds)) ms"
+        Self.logger.info("\(message, privacy: .public)")
+    }
+
+    func event(_ detail: String) {
+        guard Self.isEnabled else { return }
+        let message = "[CaptureTiming][\(id)] \(detail)"
+        Self.logger.info("\(message, privacy: .public)")
+    }
+}
+#endif
+
 struct VideoCaptureDetails: Codable {
     let capturedAt: Date
     let device: String
@@ -91,6 +121,8 @@ final class MediaStore: ObservableObject {
 
     private let fileManager = FileManager.default
     private let nextNumberKey = "nextCaptureNumber"
+    // Shared across windows while background writes are suspended.
+    private static var reservedCaptureStems: Set<String> = []
 
     private var mediaDirectory: URL {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -194,33 +226,113 @@ final class MediaStore: ObservableObject {
     }
 
     func savePhoto(_ data: Data) throws {
-        let url: URL
-        do {
-            url = try nextAvailableURL(extension: "HEIC")
-        } catch {
+        let url = try photoDestination()
+        let temporaryURL = mediaDirectory.appendingPathComponent(UUID().uuidString)
+        let dates = try Self.writePhoto(data, to: url, via: temporaryURL)
+        registerCapture(at: url, kind: .photo, dates: dates)
+    }
+
+    func saveCapturedPhoto(_ data: Data) async throws {
+#if DEBUG
+        let timing = CaptureTiming.current
+        let saveStart = CaptureTiming.now()
+        defer { timing?.record("photo.storeTotal", since: saveStart) }
+        let destinationStart = CaptureTiming.now()
+#endif
+        let url = try photoDestination()
+        let stem = url.deletingPathExtension().lastPathComponent
+        Self.reservedCaptureStems.insert(stem)
+        defer { Self.reservedCaptureStems.remove(stem) }
+        let temporaryURL = mediaDirectory.appendingPathComponent(UUID().uuidString)
+#if DEBUG
+        timing?.record("photo.prepareDestination", since: destinationStart)
+        let workerStart = CaptureTiming.now()
+#endif
+        let dates = try await Task.detached(priority: .userInitiated) {
+#if DEBUG
+            let enteredAt = CaptureTiming.now()
+            timing?.record("photo.writeWorkerWait", since: workerStart, until: enteredAt)
+            return try CaptureTiming.$current.withValue(timing) {
+                try Self.writePhoto(data, to: url, via: temporaryURL)
+            }
+#else
+            try Self.writePhoto(data, to: url, via: temporaryURL)
+#endif
+        }.value
+        registerCapture(at: url, kind: .photo, dates: dates)
+    }
+
+    private func photoDestination() throws -> URL {
+        do { return try nextAvailableURL(extension: "HEIC") }
+        catch {
             throw MediaStoreError.photoSaveFailed(stage: "prepare destination", underlying: error as NSError)
         }
-        let temporaryURL = mediaDirectory.appendingPathComponent(UUID().uuidString)
+    }
+
+    nonisolated private static func writePhoto(
+        _ data: Data, to url: URL, via temporaryURL: URL
+    ) throws -> (createdAt: Date, modifiedAt: Date) {
+        let fileManager = FileManager.default
         defer { try? fileManager.removeItem(at: temporaryURL) }
+#if DEBUG
+        let timing = CaptureTiming.current
+        let writeStart = CaptureTiming.now()
+#endif
         do {
             try data.write(to: temporaryURL, options: .atomic)
         } catch {
+#if DEBUG
+            timing?.record("photo.writeFile.failed", since: writeStart)
+#endif
             throw MediaStoreError.photoSaveFailed(stage: "write temporary file", underlying: error as NSError)
         }
+#if DEBUG
+        timing?.record("photo.writeFile", since: writeStart)
+        let finalizeStart = CaptureTiming.now()
+#endif
         do {
             // Move the completed file into place without replacing an existing capture.
             try fileManager.moveItem(at: temporaryURL, to: url)
         } catch {
+#if DEBUG
+            timing?.record("photo.finalizeFile.failed", since: finalizeStart)
+#endif
             throw MediaStoreError.photoSaveFailed(stage: "finalize file", underlying: error as NSError)
         }
-        // The directory was loaded on entry. Add this capture without rescanning
-        // every existing file or reconciling the same caches a second time.
+#if DEBUG
+        timing?.record("photo.finalizeFile", since: finalizeStart)
+        let attributesStart = CaptureTiming.now()
+#endif
         let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-        items.insert(MediaItem(url: url, kind: .photo,
-                               createdAt: values?.creationDate ?? Date(),
-                               modifiedAt: values?.contentModificationDate ?? Date()), at: 0)
+#if DEBUG
+        timing?.record("photo.fileAttributes", since: attributesStart)
+#endif
+        return (values?.creationDate ?? Date(), values?.contentModificationDate ?? Date())
+    }
+
+    private func registerCapture(at url: URL, kind: MediaItem.Kind,
+                                 dates: (createdAt: Date, modifiedAt: Date)) {
+#if DEBUG
+        let timing = CaptureTiming.current
+        let publishStart = CaptureTiming.now()
+#endif
+        // Publish the completed capture without rereading the whole media directory.
+        items.insert(MediaItem(url: url, kind: kind,
+                               createdAt: dates.createdAt, modifiedAt: dates.modifiedAt), at: 0)
+#if DEBUG
+        timing?.record("photo.publishItem", since: publishStart)
+        let indexStart = CaptureTiming.now()
+#endif
         searchIndex.reconcile(items: items)
+#if DEBUG
+        timing?.record("photo.reconcileSearch", since: indexStart)
+        let thumbnailStart = CaptureTiming.now()
+#endif
         MediaThumbnailCache.shared.reconcile(items: items)
+#if DEBUG
+        timing?.record("photo.reconcileThumbnails", since: thumbnailStart)
+        timing?.record("photo.updateLibrary", since: publishStart)
+#endif
     }
 
     func saveEditedPhoto(_ data: Data, for item: MediaItem, overwrite: Bool) throws {
@@ -246,29 +358,42 @@ final class MediaStore: ObservableObject {
         }
     }
 
-    func saveVideo(from temporaryURL: URL, captureDetails: VideoCaptureDetails? = nil) throws {
+    func saveVideo(from temporaryURL: URL, captureDetails: VideoCaptureDetails? = nil) async throws {
         let url = try nextAvailableURL(extension: "MOV")
-        let infoURL = url.deletingPathExtension().appendingPathExtension("INFO.json")
-        // Commit metadata first: a metadata failure leaves the original temporary movie intact.
+        let stem = url.deletingPathExtension().lastPathComponent
+        Self.reservedCaptureStems.insert(stem)
+        defer { Self.reservedCaptureStems.remove(stem) }
+        var infoData: Data?
         if let captureDetails {
             let detailsData = try JSONEncoder().encode(captureDetails)
             let details = try JSONSerialization.jsonObject(with: detailsData)
-            let data = try JSONSerialization.data(withJSONObject: ["captureDetails": details])
-            try data.write(to: infoURL, options: .atomic)
+            infoData = try JSONSerialization.data(withJSONObject: ["captureDetails": details])
+        }
+        let metadata = infoData
+        let capturedAt = captureDetails?.capturedAt ?? Date()
+        let dates = try await Task.detached(priority: .userInitiated) {
+            try Self.writeVideo(from: temporaryURL, to: url, infoData: metadata, capturedAt: capturedAt)
+        }.value
+        registerCapture(at: url, kind: .video, dates: dates)
+    }
+
+    nonisolated private static func writeVideo(
+        from temporaryURL: URL, to url: URL, infoData: Data?, capturedAt: Date
+    ) throws -> (createdAt: Date, modifiedAt: Date) {
+        let fileManager = FileManager.default
+        let infoURL = url.deletingPathExtension().appendingPathExtension("INFO.json")
+        // Commit metadata first: a metadata failure leaves the original temporary movie intact.
+        if let infoData {
+            try infoData.write(to: infoURL, options: .atomic)
         }
         do {
             try fileManager.moveItem(at: temporaryURL, to: url)
         } catch {
-            if captureDetails != nil { try? fileManager.removeItem(at: infoURL) }
+            if infoData != nil { try? fileManager.removeItem(at: infoURL) }
             throw error
         }
-        // Keep a successfully saved movie visible even if refreshing the directory fails.
         let values = try? url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-        items.insert(MediaItem(url: url, kind: .video,
-                               createdAt: values?.creationDate ?? captureDetails?.capturedAt ?? Date(),
-                               modifiedAt: values?.contentModificationDate ?? Date()), at: 0)
-        try? load()
-        MediaThumbnailCache.shared.reconcile(items: items)
+        return (values?.creationDate ?? capturedAt, values?.contentModificationDate ?? Date())
     }
 
     func saveEditedVideo(from temporaryURL: URL, for item: MediaItem, overwrite: Bool) async throws {
@@ -428,6 +553,7 @@ final class MediaStore: ObservableObject {
         for offset in 0..<9_999 {
             let number = ((next - 1 + offset) % 9_999) + 1
             let stem = String(format: "IMG_%04d", number)
+            if Self.reservedCaptureStems.contains(stem) { continue }
             let occupied = ["HEIC", "MOV", "TXT", "INFO.json"].contains {
                 fileManager.fileExists(atPath: mediaDirectory.appendingPathComponent(stem).appendingPathExtension($0).path)
             }
@@ -440,7 +566,7 @@ final class MediaStore: ObservableObject {
     }
 }
 
-private enum MediaStoreError: LocalizedError {
+nonisolated private enum MediaStoreError: LocalizedError {
     case photoSaveFailed(stage: String, underlying: NSError)
     case noAvailableFilename
     case invalidEditedPhoto
