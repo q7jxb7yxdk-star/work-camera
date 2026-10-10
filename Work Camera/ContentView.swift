@@ -1165,6 +1165,7 @@ private struct LibraryView: View {
     @State private var filter: Filter = .all
     @State private var isSelecting = false
     @State private var selectedIDs: Set<String> = []
+    @State private var dragSelection: LibraryDragSelection?
     @State private var selectionSharePayload: LibrarySharePayload?
     @State private var searchText = ""
     @State private var detailItem: MediaItem?
@@ -1582,6 +1583,18 @@ private struct LibraryView: View {
                         .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
                     }
                 }
+                .background {
+                    LibrarySelectionGesture(
+                        isEnabled: isSelecting,
+                        canStart: { point, width in
+                            selectionIndex(at: point, width: width, count: items.count) != nil
+                        },
+                        onChange: { start, current, width in
+                            updateDragSelection(start: start, current: current, width: width, items: items)
+                        },
+                        onEnd: { dragSelection = nil }
+                    )
+                }
             }
         }
         .scrollIndicators(.hidden)
@@ -1612,6 +1625,35 @@ private struct LibraryView: View {
                 }
         }
         .aspectRatio(1, contentMode: .fit)
+    }
+
+    // Matches the five square columns and two-point gaps in the grid above.
+    private func selectionIndex(at point: CGPoint, width: CGFloat, count: Int) -> Int? {
+        guard width > 0, count > 0, point.x >= 0, point.x < width, point.y >= 0 else { return nil }
+        let pitch = (width + 2) / 5
+        let column = min(4, Int(point.x / pitch))
+        let row = Int(point.y / pitch)
+        let index = row * 5 + column
+        return index < count ? index : nil
+    }
+
+    private func updateDragSelection(start: CGPoint, current: CGPoint, width: CGFloat, items: [MediaItem]) {
+        guard isSelecting else { return }
+        let ids = items.map(\.id)
+        if dragSelection == nil {
+            guard let anchor = selectionIndex(at: start, width: width, count: ids.count) else { return }
+            dragSelection = LibraryDragSelection(
+                ids: ids, anchor: anchor, originalIDs: selectedIDs,
+                isAdding: !selectedIDs.contains(ids[anchor])
+            )
+        }
+        guard let drag = dragSelection, drag.ids == ids,
+              let end = selectionIndex(at: current, width: width, count: ids.count) else { return }
+        let rangeIDs = Set(ids[min(drag.anchor, end)...max(drag.anchor, end)])
+        // Rebuild from the starting selection so reversing the drag restores prior choices.
+        selectedIDs = drag.isAdding
+            ? drag.originalIDs.union(rangeIDs)
+            : drag.originalIDs.subtracting(rangeIDs)
     }
 
     private var collections: some View {
@@ -1885,6 +1927,7 @@ private struct LibraryView: View {
     private func resetSelection() {
         isSelecting = false
         selectedIDs.removeAll()
+        dragSelection = nil
         showDeleteConfirmation = false
     }
 
@@ -1940,6 +1983,115 @@ private struct LibraryView: View {
             .background(tab == target ? Color(uiColor: .tertiarySystemFill) : .clear, in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct LibraryDragSelection {
+    let ids: [String]
+    let anchor: Int
+    let originalIDs: Set<String>
+    let isAdding: Bool
+}
+
+private struct LibrarySelectionGesture: UIViewRepresentable {
+    var isEnabled: Bool
+    var canStart: (CGPoint, CGFloat) -> Bool
+    var onChange: (CGPoint, CGPoint, CGFloat) -> Void
+    var onEnd: () -> Void
+
+    func makeUIView(context: Context) -> LibrarySelectionGestureView {
+        LibrarySelectionGestureView()
+    }
+
+    func updateUIView(_ view: LibrarySelectionGestureView, context: Context) {
+        view.canStart = canStart
+        view.onChange = onChange
+        view.onEnd = onEnd
+        view.pan.isEnabled = isEnabled
+        view.attachToScrollView()
+    }
+
+    static func dismantleUIView(_ view: LibrarySelectionGestureView, coordinator: ()) {
+        view.detach()
+    }
+}
+
+private final class LibrarySelectionGestureView: UIView, UIGestureRecognizerDelegate {
+    var canStart: ((CGPoint, CGFloat) -> Bool)?
+    var onChange: ((CGPoint, CGPoint, CGFloat) -> Void)?
+    var onEnd: (() -> Void)?
+    private weak var scrollView: UIScrollView?
+    private var startPoint: CGPoint?
+    lazy var pan: UIPanGestureRecognizer = {
+        let recognizer = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        recognizer.delegate = self
+        recognizer.maximumNumberOfTouches = 1
+        recognizer.cancelsTouchesInView = true
+        return recognizer
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { detach() } else { attachToScrollView() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        attachToScrollView()
+    }
+
+    func attachToScrollView() {
+        guard window != nil else { return }
+        var ancestor = superview
+        while let view = ancestor {
+            if let scroll = view as? UIScrollView {
+                guard scrollView !== scroll else { return }
+                detach()
+                scrollView = scroll
+                scroll.addGestureRecognizer(pan)
+                // Decide direction first: vertical drags fail selection and scroll normally.
+                scroll.panGestureRecognizer.require(toFail: pan)
+                return
+            }
+            ancestor = view.superview
+        }
+    }
+
+    func detach() {
+        scrollView?.removeGestureRecognizer(pan)
+        scrollView = nil
+        startPoint = nil
+    }
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let velocity = pan.velocity(in: self)
+        guard abs(velocity.x) > abs(velocity.y) else { return false }
+        let location = pan.location(in: self)
+        let translation = pan.translation(in: self)
+        let start = CGPoint(x: location.x - translation.x, y: location.y - translation.y)
+        guard bounds.contains(start), canStart?(start, bounds.width) == true else { return false }
+        startPoint = start
+        return true
+    }
+
+    @objc private func handlePan(_ recognizer: UIPanGestureRecognizer) {
+        switch recognizer.state {
+        case .began, .changed:
+            guard let startPoint else { return }
+            onChange?(startPoint, recognizer.location(in: self), bounds.width)
+        case .ended, .cancelled, .failed:
+            startPoint = nil
+            onEnd?()
+        default:
+            break
+        }
     }
 }
 
