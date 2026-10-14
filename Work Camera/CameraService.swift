@@ -202,27 +202,17 @@ final class CameraService: NSObject, ObservableObject {
         }
     }
     var isMacroAvailable: Bool { cameraPosition == .back && macroCamera != nil }
+    static let zoomPresets: [CGFloat] = [0.5, 1, 2, 4, 8]
+
     var availableZoomFactors: [CGFloat] {
-        guard videoInput != nil else { return [1] }
+        guard videoInput != nil else { return [] }
         guard cameraPosition == .back else { return [1] }
-        let lensFactors = physicalBackLenses.map { $0.baseZoom }
-        var factors = lensFactors + [1, 2]
-        // Offer an 8× crop shortcut when a 4× telephoto is present.
-        if lensFactors.contains(where: { abs($0 - 4) < 0.1 }) {
-            factors.append(8)
-        }
-        if ultraWideCamera != nil { factors.append(0.5) }
-        return factors.filter { factor in
+        return Self.zoomPresets.filter { factor in
             guard let lens = physicalBackLens(for: factor) else { return false }
             let deviceFactor = factor / lens.baseZoom
             return deviceFactor >= lens.device.minAvailableVideoZoomFactor &&
                 deviceFactor <= lens.device.maxAvailableVideoZoomFactor
         }
-        .map { (round($0 * 10) / 10) }
-        .reduce(into: [CGFloat]()) { result, factor in
-            if !result.contains(factor) { result.append(factor) }
-        }
-        .sorted()
     }
     var flashSymbol: String {
         switch flashMode {

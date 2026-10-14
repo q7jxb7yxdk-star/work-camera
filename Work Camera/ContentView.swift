@@ -14,16 +14,24 @@ struct ContentView: View {
         case exposure
         case timer
         case grid
+        case level
         case shutterSound
         case dateTimeStamp
         case photoQuality
     }
 
+    private enum CaptureSelector: Equatable {
+        case zoom
+    }
+
+    @State private var activeSelector: CaptureSelector?
     @ObservedObject var navigation: CameraSceneNavigation
     @StateObject private var store = MediaStore()
     @StateObject private var camera = CameraService()
+    @StateObject private var cameraLevel = CameraLevel()
     @State private var didPrepareRoot = false
     @State private var showGrid = true
+    @AppStorage("cameraLevelEnabled") private var showLevel = true
     @AppStorage("shutterSoundEnabled") private var shutterSoundEnabled = true
     @AppStorage("photoDateTimeStampEnabled") private var photoDateTimeStampEnabled = false
     @AppStorage("photoQuality") private var photoQuality: CameraService.PhotoQuality = .balanced
@@ -37,6 +45,10 @@ struct ContentView: View {
     @State private var deviceOrientation: UIDeviceOrientation = .portrait
     @State private var portraitCameraInsets: UIEdgeInsets?
     @State private var portraitCameraSize: CGSize?
+
+    private let cameraAccent = Color(red: 0.34, green: 0.88, blue: 0.77)
+    private let cameraBackground = Color(red: 0.045, green: 0.09, blue: 0.12)
+    private let cameraSurface = Color(red: 0.085, green: 0.15, blue: 0.19)
 
     private var scenePhase: ScenePhase { navigation.scenePhase }
     private var libraryFlowActive: Bool { navigation.libraryVisible }
@@ -88,6 +100,7 @@ struct ContentView: View {
         }
         .onDisappear {
             cancelCountdown()
+            cameraLevel.stop()
             camera.stop()
             UIApplication.shared.isIdleTimerDisabled = false
         }
@@ -96,18 +109,31 @@ struct ContentView: View {
                 cancelCountdown()
                 showCameraControls = false
                 activeControl = nil
+                activeSelector = nil
             }
         }
         .onChange(of: camera.mode) { _, newMode in
             if newMode == .video { cancelCountdown() }
+            activeSelector = nil
             activeControl = nil
             showCameraControls = false
         }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
                 cancelCountdown()
+                activeSelector = nil
             }
             if newPhase == .background { camera.resetZoomOnNextStart() }
+        }
+        .onChange(of: shouldRunCameraLevel, initial: true) { _, shouldRun in
+            if shouldRun {
+                cameraLevel.start()
+            } else {
+                cameraLevel.stop()
+            }
+        }
+        .onChange(of: camera.isRecording) { _, isRecording in
+            if isRecording { activeSelector = nil }
         }
         .task(id: shouldKeepScreenAwake) {
             guard !Task.isCancelled else { return }
@@ -123,6 +149,10 @@ struct ContentView: View {
 
     private var shouldKeepScreenAwake: Bool {
         scenePhase == .active && portraitCameraSize != nil && !libraryFlowActive
+    }
+
+    private var shouldRunCameraLevel: Bool {
+        shouldKeepScreenAwake && camera.isAuthorized && showLevel
     }
 
     private func clearErrors() {
@@ -153,7 +183,7 @@ struct ContentView: View {
                                     height: max(size.width, size.height))
     }
 
-    // Rotate labels only. Button frames and PHOTO/VIDEO remain in portrait device coordinates.
+    // The capture workspace stays in portrait coordinates; compact tool labels follow the device.
     private var controlLabelAngle: Angle {
         switch deviceOrientation {
         case .landscapeLeft: .degrees(90)
@@ -179,64 +209,45 @@ struct ContentView: View {
         let bottomSafeAreaInset = portraitCameraInsets?.bottom ?? 0
         let isVideo = camera.mode == .video
         let previewRatio: CGFloat = camera.mode == .photo ? 4 / 3 : 16 / 9
-        let topHeight = isVideo ? cameraEdgeInset : max(max(80, cameraEdgeInset + 52),
+        // Keep PHOTO geometry unchanged; VIDEO reserves the compact 64pt action panel.
+        let originalTopHeight = isVideo ? cameraEdgeInset : max(max(80, cameraEdgeInset + 52),
             (deviceHeight - deviceWidth * previewRatio) * 0.33)
-        let bottomHeight = isVideo ? 76 + bottomSafeAreaInset : 188
-        let previewHeight = min(deviceWidth * previewRatio, max(0, deviceHeight - topHeight - bottomHeight))
+        let bottomHeight = isVideo ? 64 + bottomSafeAreaInset : 188
+        let previewHeight = min(deviceWidth * previewRatio, max(0, deviceHeight - originalTopHeight - bottomHeight))
         let previewWidth = isVideo ? deviceWidth : previewHeight / previewRatio
+        // Move only PHOTO's viewport down; reserve the fixed bottom action row.
+        let photoOffset = isVideo ? 0 : min(14, max(0,
+            deviceHeight - originalTopHeight - previewHeight - 76 - bottomSafeAreaInset))
+        let topHeight = originalTopHeight + photoOffset
+        let bottomPanelHeight = max(0, deviceHeight - topHeight - previewHeight)
+        let toolsPanelHeight = min(600, max(0, deviceHeight - cameraEdgeInset - bottomSafeAreaInset - 24))
 
         return ZStack {
-            // The sensor and the fixed portrait preview rotate with the handset.
+            cameraBackground
+
+            cameraSurface
+                .frame(width: deviceWidth, height: bottomPanelHeight)
+                .position(x: deviceWidth / 2, y: deviceHeight - bottomPanelHeight / 2)
+                .allowsHitTesting(false)
+
+            // Controls adapt around the viewport without reducing its size.
             cameraPreview()
                 .frame(width: previewWidth, height: previewHeight)
                 .clipped()
                 .position(x: deviceWidth / 2, y: topHeight + previewHeight / 2)
 
-            // Controls retain their original portrait device coordinates.
             VStack(spacing: 0) {
-                if isVideo {
-                    Color.black.frame(height: topHeight)
-                } else {
-                    topControls()
-                        .padding(.top, cameraEdgeInset)
-                        .frame(height: topHeight)
-                        .background(.black)
-                }
-
-                ZStack(alignment: .bottom) {
-                    Color.clear.allowsHitTesting(false)
-                    if isVideo {
-                        VStack {
-                            Text("HEVC")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(.white)
-                                .rotationEffect(controlLabelAngle)
-                                .shadow(color: .black.opacity(0.6), radius: 2)
-                                .padding(.top, 12)
-                                .accessibilityLabel("HEVC video")
-                                .opacity(camera.isRecording ? 0 : 1)
-                            Spacer(minLength: 0)
-                            if camera.isAuthorized {
-                                zoomControls()
-                                    .padding(.bottom, 124)
-                            }
-                        }
-                    } else if camera.isAuthorized {
-                        zoomControls()
-                            .padding(.bottom, 12)
-                    }
-                }
-                .frame(height: previewHeight)
-
-                Color.black
-                    .frame(maxHeight: .infinity)
+                topControls()
+                    .frame(height: isVideo ? 66 : max(0, topHeight - cameraEdgeInset))
+                    .background(cameraSurface.opacity(isVideo ? 0.2 : 1))
+                    .padding(.top, cameraEdgeInset)
+                    .opacity(isVideo && camera.isRecording ? 0 : 1)
+                    .allowsHitTesting(!(isVideo && camera.isRecording))
+                    .accessibilityHidden(isVideo && camera.isRecording)
+                Spacer(minLength: 0)
+                bottomControls(bottomSafeAreaInset: bottomSafeAreaInset)
             }
             .frame(width: deviceWidth, height: deviceHeight)
-            .position(x: deviceWidth / 2, y: deviceHeight / 2)
-
-            bottomControls(bottomSafeAreaInset: bottomSafeAreaInset)
-                .frame(width: deviceWidth)
-                .frame(height: deviceHeight, alignment: .bottom)
 
             if isVideo && camera.isRecording {
                 recordingTimeBadge
@@ -261,16 +272,38 @@ struct ContentView: View {
                     if let activeControl {
                         controlPanel(for: activeControl)
                     } else {
-                        cameraControlsPanel
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                Spacer(minLength: 0)
+                                cameraControlsPanel
+                            }
+                            .frame(minHeight: toolsPanelHeight)
+                        }
+                        .frame(maxWidth: 500)
+                        .frame(height: toolsPanelHeight)
                     }
                 }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                     .padding(.horizontal, activeControl == nil ? 16 : 8)
-                    .padding(.bottom, activeControl == nil ? 16 : 8)
+                    .padding(.bottom, bottomSafeAreaInset + (activeControl == nil ? 16 : 8))
+            }
+
+            if activeSelector != nil {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture { self.activeSelector = nil }
+                    .accessibilityLabel("Dismiss selection")
+                    .accessibilityAddTraits(.isButton)
+                captureSelectionPanel()
+                    .frame(maxWidth: 420)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, bottomSafeAreaInset + (isVideo ? 64 : 76) + 8)
             }
         }
         .frame(width: deviceWidth, height: deviceHeight)
-        .background(.black)
+        .background(cameraBackground)
         .ignoresSafeArea()
         .environment(\.colorScheme, .dark)
         .transaction { $0.animation = nil }
@@ -325,22 +358,21 @@ struct ContentView: View {
                     updateCameraScene(scene)
                 }
             )
-            .gesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { value in
-                        let translation = value.translation
-                        guard abs(translation.width) >= 50,
-                              abs(translation.width) > abs(translation.height),
-                              !camera.isBusy,
-                              !camera.isRecording,
-                              countdownRemaining == nil else { return }
-                        camera.mode = translation.width > 0 ? .video : .photo
-                    }
-            )
             .opacity(camera.isAuthorized ? 1 : 0)
             .allowsHitTesting(camera.isAuthorized)
             if camera.isAuthorized {
                 if showGrid { CameraGrid() }
+                if shouldRunCameraLevel, let reading = cameraLevel.reading {
+                    switch reading {
+                    case .horizon(let angle, let pitch):
+                        CameraLevelOverlay(gravityAngle: angle, pitch: pitch,
+                                           referenceAngle: controlLabelAngle,
+                                           tint: cameraAccent)
+                    case .overhead(let x, let y, let isAligned):
+                        CameraOverheadLevelOverlay(x: x, y: y, isAligned: isAligned,
+                                                   tint: cameraAccent)
+                    }
+                }
                 if let countdownRemaining {
                     Text("\(countdownRemaining)")
                         .font(.system(size: 92, weight: .light, design: .rounded))
@@ -359,86 +391,68 @@ struct ContentView: View {
                 .foregroundStyle(.white)
             }
         }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 30)
+                .onEnded { value in
+                    let translation = value.translation
+                    guard abs(translation.width) >= 50,
+                          abs(translation.width) > abs(translation.height),
+                          camera.isAuthorized,
+                          camera.isReady,
+                          !camera.isBusy,
+                          !camera.isRecording,
+                          countdownRemaining == nil,
+                          !showCameraControls,
+                          activeSelector == nil,
+                          activeControl == nil else { return }
+                    camera.mode = translation.width > 0 ? .video : .photo
+                }
+        )
     }
 
     private func topControls() -> some View {
         let expectedMegapixels = camera.photoResolutionMegapixels(for: photoQuality)
-        return HStack(spacing: 0) {
-            Button {
-                showCameraControls = false
-                activeControl = .flash
-            } label: {
-                Image(systemName: camera.flashSymbol)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(camera.flashMode == .off ? .white : .yellow)
-                    .frame(width: 44, height: 44)
-                    .overlay(alignment: .bottomTrailing) {
-                        if camera.flashMode == .auto {
-                            Text("A")
-                                .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(.black)
-                                .frame(width: 10, height: 10)
-                                .background(.yellow, in: Circle())
-                        }
-                    }
-            }
-            .rotationEffect(controlLabelAngle)
-            .accessibilityLabel("Flash: \(camera.flashDescription)")
-            .disabled(camera.mode != .photo || !camera.hasFlash || camera.isRecording || countdownRemaining != nil)
-
-            Button {
-                showCameraControls = false
-                activeControl = .timer
-            } label: {
-                VStack(spacing: 0) {
-                    Image(systemName: "timer")
-                        .font(.system(size: 20))
-                    if timerSeconds > 0 {
-                        Text("\(timerSeconds)s")
-                            .font(.system(size: 9, weight: .semibold))
+        let flashStatus = camera.mode == .photo
+            ? (camera.hasFlash ? camera.flashDescription : "Unavailable")
+            : camera.videoTorchDescription
+        let flashSymbol = flashStatus == "Off" || flashStatus == "Unavailable"
+            ? "bolt.slash.fill" : "bolt.fill"
+        return HStack(spacing: 12) {
+            Text(camera.mode == .photo
+                 ? expectedMegapixels.map { "HEIC \($0) MP" } ?? "HEIC"
+                 : "HEVC")
+                .font(.system(size: 17, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .foregroundStyle(cameraAccent)
+                .accessibilityLabel(camera.mode == .photo
+                    ? expectedMegapixels.map { "HEIC photo, expected \($0) megapixels" } ?? "HEIC photo"
+                    : "HEVC video")
+            Spacer(minLength: 8)
+            Image(systemName: flashSymbol)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .overlay(alignment: .bottomTrailing) {
+                    if flashStatus == "Auto" {
+                        Text("A")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(cameraBackground)
+                            .frame(width: 10, height: 10)
+                            .background(cameraAccent, in: RoundedRectangle(cornerRadius: 3))
+                            .accessibilityHidden(true)
                     }
                 }
-                .frame(width: 44, height: 44)
-                .foregroundStyle(timerSeconds > 0 ? .yellow : .white)
-            }
-            .rotationEffect(controlLabelAngle)
-            .accessibilityLabel("Timer: \(timerSeconds == 0 ? "Off" : "\(timerSeconds) seconds")")
-            .disabled(camera.mode != .photo || camera.isRecording || countdownRemaining != nil)
-
-            VStack(spacing: 0) {
-                Text(camera.mode == .photo ? "HEIC" : "HEVC")
-                    .font(.system(size: 13, weight: .medium))
-                if camera.mode == .photo, let megapixels = expectedMegapixels {
-                    Text("\(megapixels)")
-                        .font(.system(size: 10, weight: .semibold))
-                }
-            }
-            .frame(width: 44, height: 44)
-            .rotationEffect(controlLabelAngle)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(camera.mode == .photo
-                ? expectedMegapixels.map { "HEIC photo, expected \($0) megapixels" } ?? "HEIC photo"
-                : "HEVC video")
+                .rotationEffect(controlLabelAngle)
+                .foregroundStyle(flashStatus == "Unavailable" ? .white.opacity(0.7) : cameraAccent)
+                .accessibilityLabel(camera.mode == .photo ? "Photo flash" : "Video torch")
+                .accessibilityValue(flashStatus)
+            controlsButton
         }
         .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func zoomControls() -> some View {
-        HStack(spacing: 12) {
-            ForEach(camera.availableZoomFactors, id: \.self) { factor in
-                Button { camera.setZoomFactor(factor) } label: {
-                    Text(zoomLabel(for: factor))
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(abs(camera.zoomFactor - factor) < 0.05 ? .yellow : .white)
-                        .rotationEffect(controlLabelAngle)
-                        .frame(width: 44, height: 44)
-                        .background(abs(camera.zoomFactor - factor) < 0.05 ? .black.opacity(0.55) : .clear, in: Circle())
-                }
-                .accessibilityLabel("\(factor.formatted()) times zoom")
-            }
-        }
-        .disabled(!camera.isReady || camera.isRecording || countdownRemaining != nil)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
     }
 
     private func zoomLabel(for factor: CGFloat) -> String {
@@ -446,136 +460,230 @@ struct ContentView: View {
     }
 
     private func bottomControls(bottomSafeAreaInset: CGFloat) -> some View {
-        // Native camera proportions: row centers 120pt and 24pt above the safe area.
-        VStack(spacing: 32) {
-            captureControls
-                .frame(height: 80)
-
-            // Keep the library thumbnail alive when switching capture modes.
-            modeControls
-                .frame(height: 48)
+        let panelHeight: CGFloat = camera.mode == .video ? 64 : 76
+        return GeometryReader { geometry in
+            let controlWidth = min(60, max(44, (geometry.size.width - 16) / 5.25))
+            HStack(spacing: 4) {
+                zoomMenu(width: controlWidth)
+                modeToggle(width: controlWidth)
+                captureButton(width: controlWidth * 1.25, height: controlWidth)
+                libraryControl(width: controlWidth)
+                macroControl(width: controlWidth)
+            }
+            .frame(width: geometry.size.width, height: 64)
+            .frame(height: panelHeight, alignment: .bottom)
         }
+        .frame(height: panelHeight)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: 720)
+        .background(cameraSurface, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 4)
         .padding(.bottom, bottomSafeAreaInset)
         .foregroundStyle(.white)
     }
 
-    private var captureControls: some View {
-        HStack {
-            macroButton
-            Spacer()
-            shutterButton
-            Spacer()
-            controlsButton
-        }
-        .padding(.horizontal, 34)
-        .foregroundStyle(.white)
-    }
-
-    private var modeControls: some View {
-        HStack(spacing: 10) {
-            libraryButton
-
-            HStack(spacing: 2) {
-                modeButton(.video, title: "VIDEO")
-                modeButton(.photo, title: "PHOTO")
+    private func zoomMenu(width: CGFloat) -> some View {
+        Button {
+            activeSelector = .zoom
+        } label: {
+            VStack(spacing: 3) {
+                Text(zoomLabel(for: camera.zoomFactor))
+                    .font(.system(size: min(18, width * 0.26), weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
             }
-            .padding(2)
-            .background(.white.opacity(0.1), in: Capsule())
-            .frame(maxWidth: .infinity)
-
-            switchCameraButton
+            .foregroundStyle(cameraAccent)
+            .rotationEffect(controlLabelAngle)
+            .frame(width: width, height: width)
+            .background(cameraBackground, in: RoundedRectangle(cornerRadius: 10))
         }
-        .padding(.horizontal, 34)
-        .foregroundStyle(.white)
+        .accessibilityLabel("Zoom")
+        .accessibilityValue(zoomLabel(for: camera.zoomFactor))
+        .disabled(!camera.isReady || camera.isBusy || camera.isRecording || countdownRemaining != nil)
     }
 
-    private var macroButton: some View {
-        Button { camera.toggleMacro() } label: {
-            Image(systemName: "camera.macro")
-                .font(.system(size: 26, weight: .medium))
-                .foregroundStyle(camera.isMacroEnabled ? .yellow : .white)
-                .overlay {
-                    if !camera.isAutoMacroEnabled {
-                        Rectangle()
-                            .fill(.white)
-                            .frame(width: 2, height: 32)
-                            .rotationEffect(.degrees(45))
+    private func modeToggle(width: CGFloat) -> some View {
+        Button {
+            guard canSelectCaptureOption else { return }
+            activeSelector = nil
+            camera.mode = camera.mode == .photo ? .video : .photo
+        } label: {
+            VStack(spacing: 3) {
+                Text(camera.mode == .photo ? "PHOTO" : "VIDEO")
+                    .font(.system(size: min(13, width * 0.2), weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(cameraAccent)
+            .rotationEffect(controlLabelAngle)
+            .frame(width: width, height: width)
+            .background(cameraBackground, in: RoundedRectangle(cornerRadius: 10))
+        }
+        .accessibilityLabel(camera.mode == .photo ? "Switch to video" : "Switch to photo")
+        .accessibilityValue(camera.mode == .photo ? "Photo" : "Video")
+        .disabled(!camera.isReady || camera.isBusy || camera.isRecording || countdownRemaining != nil)
+    }
+
+    private var canSelectCaptureOption: Bool {
+        camera.isReady && !camera.isBusy && !camera.isRecording && countdownRemaining == nil
+    }
+
+    private func captureSelectionPanel() -> some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("Zoom")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Button { activeSelector = nil } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("Close selection")
+            }
+            HStack(spacing: 6) {
+                ForEach(CameraService.zoomPresets, id: \.self) { factor in
+                    captureSelectionOption(
+                        zoomLabel(for: factor),
+                        selected: abs(camera.zoomFactor - factor) < 0.05,
+                        enabled: camera.availableZoomFactors.contains(factor)
+                    ) {
+                        guard canSelectCaptureOption,
+                              camera.availableZoomFactors.contains(factor) else { return }
+                        activeSelector = nil
+                        camera.setZoomFactor(factor)
                     }
                 }
-                .rotationEffect(controlLabelAngle)
-                .frame(width: 48, height: 48)
-                .background(.white.opacity(0.12), in: Circle())
-                .overlay {
-                    Circle().strokeBorder(
-                        camera.isMacroEnabled ? .yellow : .white.opacity(0.2), lineWidth: 2
-                    )
-                }
+            }
+            .disabled(!canSelectCaptureOption)
         }
+        .foregroundStyle(.white)
+        .padding(12)
+        .background(cameraSurface, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(cameraAccent.opacity(0.3)))
+        .accessibilityAction(.escape) { activeSelector = nil }
+    }
+
+    private func captureSelectionOption(
+        _ title: String, selected: Bool, enabled: Bool = true, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .foregroundStyle(selected ? cameraBackground : .white)
+                .background(selected ? cameraAccent : cameraBackground,
+                            in: RoundedRectangle(cornerRadius: 10))
+                .opacity(enabled ? 1 : 0.35)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(enabled ? (selected ? "Selected" : "Available") : "Unavailable")
+    }
+
+    private var macroStatus: String {
+        if camera.isMacroEnabled { return "Macro active" }
+        if !camera.isMacroAvailable { return "Unavailable" }
+        return camera.isAutoMacroEnabled ? "Auto standby" : "Macro off"
+    }
+
+    private var compactMacroStatus: String {
+        if camera.isMacroEnabled { return "Active" }
+        if !camera.isMacroAvailable { return "N/A" }
+        return camera.isAutoMacroEnabled ? "Auto" : "Off"
+    }
+
+    private func macroControl(width: CGFloat) -> some View {
+        Button { camera.toggleMacro() } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "camera.macro")
+                    .font(.system(size: min(24, width * 0.35), weight: .medium))
+                Text(compactMacroStatus)
+                    .font(.system(size: min(12, width * 0.18), weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+            .foregroundStyle(camera.isMacroEnabled ? cameraBackground : .white)
+            .rotationEffect(controlLabelAngle)
+            .frame(width: width, height: width)
+            .background(camera.isMacroEnabled ? cameraAccent : cameraBackground,
+                        in: RoundedRectangle(cornerRadius: 10))
+        }
+        .buttonStyle(.plain)
         .accessibilityLabel(camera.isAutoMacroEnabled ? "Turn off Auto Macro" : "Turn on Auto Macro")
-        .accessibilityValue(camera.isMacroEnabled ? "Macro active" : "Macro inactive")
+        .accessibilityValue(macroStatus)
         .accessibilityHint("Automatically switches lenses for close subjects in photos and videos")
         .disabled(!camera.isReady || !camera.isMacroAvailable || camera.isBusy || camera.isRecording || countdownRemaining != nil)
     }
 
-    private var shutterButton: some View {
+    private func captureButton(width: CGFloat, height: CGFloat) -> some View {
         let isShutterDisabled = countdownRemaining == nil &&
             (camera.mode == .photo ? !camera.canAcceptPhoto : (!camera.isReady || camera.isBusy))
-        let photoShutterColor: Color = isShutterDisabled ? .white.opacity(0.35) : .white
+        let title = countdownRemaining != nil ? "Cancel timer"
+            : camera.isRecording ? "Stop recording"
+            : camera.mode == .video ? "Start recording" : "Capture photo"
+        let symbol = countdownRemaining != nil ? "xmark"
+            : camera.isRecording ? "stop.fill"
+            : camera.mode == .video ? "video.fill" : "camera.fill"
         return Button { shutterTapped() } label: {
-            ZStack {
-                Circle().strokeBorder(.white.opacity(0.35), lineWidth: 5).frame(width: 80, height: 80)
-                // Keep the light on until submitted photos finish processing/saving.
-                // Completion presentation delays do not extend this indicator.
-                if camera.pendingPhotoCount > 0 || camera.isBusy {
-                    Circle()
-                        .strokeBorder(camera.mode == .video ? Color.red : Color.white, lineWidth: 5)
-                        .frame(width: 80, height: 80)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-                if camera.isRecording {
-                    RoundedRectangle(cornerRadius: 5).fill(.red).frame(width: 30, height: 30)
-                } else {
-                    Circle().fill(camera.mode == .video ? .red : photoShutterColor).frame(width: 68, height: 68)
-                }
+            VStack(spacing: 3) {
+                Image(systemName: symbol)
+                    .font(.system(size: min(24, height * 0.35), weight: .bold))
             }
+            .rotationEffect(controlLabelAngle)
+            .frame(width: width, height: height)
+            .foregroundStyle(camera.isRecording ? Color.white : cameraBackground)
+            .background(camera.isRecording ? Color.red : cameraAccent,
+                        in: RoundedRectangle(cornerRadius: 14))
+            .opacity(isShutterDisabled ? 0.45 : 1)
         }
-        .accessibilityLabel(countdownRemaining != nil ? "Cancel timer" : camera.isRecording ? "Stop recording" : camera.mode == .video ? "Record video" : "Take photo")
+        .accessibilityLabel(title)
         .accessibilityValue(camera.pendingPhotoCount > 0 ? "\(camera.pendingPhotoCount) photos processing" : camera.isBusy ? "Processing video" : "")
         .disabled(isShutterDisabled)
     }
 
     private var controlsButton: some View {
         Button {
+            activeSelector = nil
             activeControl = nil
             showCameraControls = true
         } label: {
-            Image(systemName: "circle.grid.3x3.fill")
-                .font(.system(size: 23))
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(cameraAccent)
                 .rotationEffect(controlLabelAngle)
-                .frame(width: 48, height: 48)
-                .background(.white.opacity(0.12), in: Circle())
-                .overlay(Circle().strokeBorder(.yellow, lineWidth: 2))
+                .frame(width: 44, height: 44)
+                .background(cameraBackground.opacity(camera.mode == .video ? 0.3 : 1),
+                            in: RoundedRectangle(cornerRadius: 10))
         }
-        .accessibilityLabel("Camera controls")
+        .accessibilityLabel("Camera tools")
     }
 
-    private var libraryButton: some View {
+    private func libraryControl(width: CGFloat) -> some View {
         Button { openLibrary() } label: {
-            ZStack {
-                Circle().fill(.white.opacity(0.12))
+            VStack(spacing: 3) {
                 if let item = store.items.first {
                     MediaThumbnail(item: item)
-                        .frame(width: 48, height: 48)
-                        .clipped()
+                        .frame(width: width - 8, height: width - 8)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                 } else {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.title3)
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: min(26, width * 0.45)))
+                        .frame(height: width - 8)
                 }
             }
-            .frame(width: 48, height: 48)
-            .clipShape(Circle())
+            .foregroundStyle(cameraAccent)
             .rotationEffect(controlLabelAngle)
+            .frame(width: width, height: width)
+            .background(cameraBackground, in: RoundedRectangle(cornerRadius: 10))
         }
         .accessibilityLabel("Open Library")
         .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
@@ -583,11 +691,10 @@ struct ContentView: View {
 
     private var switchCameraButton: some View {
         Button { camera.switchCamera() } label: {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 25))
-                .rotationEffect(controlLabelAngle)
-                .frame(width: 48, height: 48)
-                .background(.white.opacity(0.12), in: Circle())
+            Image(systemName: "arrow.triangle.2.circlepath.camera")
+                .font(.system(size: 20))
+                .frame(width: 48, height: 44)
+                .background(cameraBackground, in: RoundedRectangle(cornerRadius: 10))
         }
         .accessibilityLabel(camera.cameraPosition == .back ? "Switch to front camera" : "Switch to back camera")
         .disabled(!camera.isReady || camera.isBusy || camera.isRecording || countdownRemaining != nil)
@@ -595,9 +702,23 @@ struct ContentView: View {
 
     private var cameraControlsPanel: some View {
         VStack(spacing: 28) {
-            Capsule()
-                .fill(.white.opacity(0.55))
-                .frame(width: 48, height: 5)
+            HStack {
+                Text("Camera tools")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    showCameraControls = false
+                }
+                .foregroundStyle(cameraAccent)
+                .frame(minHeight: 44)
+            }
+
+            HStack {
+                Text("Switch camera")
+                    .font(.subheadline)
+                Spacer()
+                switchCameraButton
+            }
 
             if camera.mode == .video {
                 HStack(alignment: .top, spacing: 24) {
@@ -608,6 +729,7 @@ struct ContentView: View {
                     videoControlButton(.exposure, title: "EXPOSURE", symbol: "plusminus",
                                        value: exposureLabel)
                         .disabled(!camera.canAdjustExposure)
+                    levelControlButton
                 }
                 .disabled(!camera.isReady || camera.isBusy || camera.isRecording)
             } else {
@@ -619,11 +741,8 @@ struct ContentView: View {
         .padding(.top, 12)
         .padding(.bottom, 32)
         .frame(maxWidth: 500)
-        .background(Color(white: 0.13).opacity(0.97), in: RoundedRectangle(cornerRadius: 36))
-        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.2)))
-        .gesture(DragGesture(minimumDistance: 30).onEnded { value in
-            if value.translation.height > 50 { showCameraControls = false }
-        })
+        .background(cameraSurface, in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.2)))
         .accessibilityAction(.escape) { showCameraControls = false }
     }
 
@@ -644,16 +763,17 @@ struct ContentView: View {
                     .font(.system(size: 30, weight: .regular))
                     .frame(width: 68, height: 68)
                     .overlay(alignment: .bottomTrailing) {
-                        if control == .flash && camera.videoTorchMode == .auto {
+                        if control == .flash &&
+                            (camera.mode == .video ? camera.videoTorchMode == .auto : camera.flashMode == .auto) {
                             Text("A")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(.black)
                                 .frame(width: 14, height: 14)
-                                .background(.white, in: Circle())
+                                .background(.white, in: RoundedRectangle(cornerRadius: 14))
                                 .offset(x: -14, y: -14)
                         }
                     }
-                    .background(.black.opacity(0.5), in: Circle())
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
                 Text(title)
                     .font(.system(size: 13, weight: .regular))
                     .tracking(1.5)
@@ -665,9 +785,19 @@ struct ContentView: View {
         .accessibilityValue(value)
     }
 
+    private var levelControlButton: some View {
+        videoControlButton(.level, title: "LEVEL", symbol: "level",
+                           value: cameraLevel.isAvailable ? (showLevel ? "On" : "Off") : "Unavailable")
+            .disabled(!cameraLevel.isAvailable)
+    }
+
     private var photoControlsPanelContent: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24), count: 3),
                   alignment: .center, spacing: 24) {
+            videoControlButton(.flash, title: "FLASH", symbol: camera.flashSymbol, value: camera.flashDescription)
+                .disabled(!camera.isReady || !camera.hasFlash || camera.isBusy || camera.isRecording || countdownRemaining != nil)
+            videoControlButton(.timer, title: "TIMER", symbol: "timer", value: timerSeconds == 0 ? "Off" : "\(timerSeconds)s")
+                .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
             videoControlButton(.exposure, title: "EXPOSURE", symbol: "plusminus", value: exposureLabel)
                 .disabled(!camera.isReady || camera.isBusy || camera.isRecording ||
                           countdownRemaining != nil || !camera.canAdjustExposure)
@@ -679,7 +809,7 @@ struct ContentView: View {
                     Image(systemName: "square.grid.3x3")
                         .font(.system(size: 26, weight: .light))
                         .frame(width: 68, height: 68)
-                        .background(showGrid ? .white.opacity(0.2) : .black.opacity(0.5), in: Circle())
+                        .background(showGrid ? .white.opacity(0.2) : .black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
                     Text("GRID")
                         .font(.system(size: 13, weight: .regular))
                         .tracking(1.5)
@@ -700,7 +830,7 @@ struct ContentView: View {
                         .font(.system(size: 26, weight: .light))
                         .frame(width: 68, height: 68)
                         .background(shutterSoundEnabled || !camera.canSuppressShutterSound
-                                    ? .white.opacity(0.2) : .black.opacity(0.5), in: Circle())
+                                    ? .white.opacity(0.2) : .black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
                     Text("SHUTTER SOUND")
                         .font(.system(size: 13, weight: .regular))
                         .tracking(1.5)
@@ -713,6 +843,8 @@ struct ContentView: View {
             .accessibilityLabel("Shutter sound")
             .accessibilityValue(camera.canSuppressShutterSound ? (shutterSoundEnabled ? "On" : "Off") : "Unavailable")
 
+            levelControlButton
+
             Button {
                 showCameraControls = false
                 activeControl = .dateTimeStamp
@@ -721,7 +853,7 @@ struct ContentView: View {
                     Image(systemName: "calendar.badge.clock")
                         .font(.system(size: 26, weight: .light))
                         .frame(width: 68, height: 68)
-                        .background(photoDateTimeStampEnabled ? .white.opacity(0.2) : .black.opacity(0.5), in: Circle())
+                        .background(photoDateTimeStampEnabled ? .white.opacity(0.2) : .black.opacity(0.5), in: RoundedRectangle(cornerRadius: 14))
                     Text("DATE & TIME")
                         .font(.system(size: 13, weight: .regular))
                         .tracking(1.5)
@@ -742,7 +874,7 @@ struct ContentView: View {
                     Image(systemName: "camera.aperture")
                         .font(.system(size: 26, weight: .light))
                         .frame(width: 68, height: 68)
-                        .background(.white.opacity(0.2), in: Circle())
+                        .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 14))
                     Text("PHOTO QUALITY")
                         .font(.system(size: 13, weight: .regular))
                         .tracking(1.5)
@@ -763,12 +895,12 @@ struct ContentView: View {
             HStack {
                 Button {
                     activeControl = nil
-                    showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp || control == .photoQuality
+                    showCameraControls = true
                 } label: {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 20, weight: .medium))
                         .frame(width: 42, height: 42)
-                        .background(.black.opacity(0.35), in: Circle())
+                        .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 14))
                 }
                 .accessibilityLabel("Back")
                 Spacer()
@@ -803,7 +935,7 @@ struct ContentView: View {
                     ExposureRuler(value: Binding(
                         get: { camera.exposureBias },
                         set: { camera.setExposureBias($0) }
-                    ), range: camera.exposureRange)
+                    ), range: camera.exposureRange, tint: cameraAccent)
                         .frame(width: 168, height: 40)
                         .disabled(!camera.isReady || camera.isBusy || camera.isRecording ||
                                   countdownRemaining != nil || !camera.canAdjustExposure)
@@ -815,6 +947,10 @@ struct ContentView: View {
                 case .grid:
                     settingOption("On", symbol: "square.grid.3x3", selected: showGrid) { showGrid = true }
                     settingOption("Off", symbol: "square.grid.3x3", selected: !showGrid) { showGrid = false }
+                case .level:
+                    settingOption("On", symbol: "level", selected: showLevel) { showLevel = true }
+                        .disabled(!cameraLevel.isAvailable)
+                    settingOption("Off", symbol: "level", selected: !showLevel) { showLevel = false }
                 case .dateTimeStamp:
                     settingOption("On", symbol: "calendar.badge.clock", selected: photoDateTimeStampEnabled) {
                         photoDateTimeStampEnabled = true
@@ -858,8 +994,8 @@ struct ContentView: View {
         .padding(.bottom, 24)
         .frame(height: 190)
         .frame(maxWidth: 500)
-        .background(Color(white: 0.13).opacity(0.97), in: RoundedRectangle(cornerRadius: 36))
-        .overlay(RoundedRectangle(cornerRadius: 36).strokeBorder(.white.opacity(0.2)))
+        .background(cameraSurface, in: RoundedRectangle(cornerRadius: 24))
+        .overlay(RoundedRectangle(cornerRadius: 24).strokeBorder(.white.opacity(0.2)))
         .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { value in
             if value.translation.height > 50,
                value.translation.height > abs(value.translation.width) {
@@ -869,7 +1005,7 @@ struct ContentView: View {
         })
         .accessibilityAction(.escape) {
             activeControl = nil
-            showCameraControls = camera.mode == .video || control == .exposure || control == .grid || control == .shutterSound || control == .dateTimeStamp || control == .photoQuality
+            showCameraControls = true
         }
     }
 
@@ -879,6 +1015,7 @@ struct ContentView: View {
         case .exposure: "EXPOSURE"
         case .timer: "TIMER"
         case .grid: "GRID"
+        case .level: "LEVEL"
         case .dateTimeStamp: "DATE & TIME"
         case .photoQuality: "PHOTO QUALITY"
         case .shutterSound: "SHUTTER SOUND"
@@ -891,6 +1028,7 @@ struct ContentView: View {
         case .exposure: exposureLabel
         case .timer: timerSeconds == 0 ? "Off" : "\(timerSeconds)s"
         case .grid: showGrid ? "On" : "Off"
+        case .level: cameraLevel.isAvailable ? (showLevel ? "On" : "Off") : "Unavailable"
         case .dateTimeStamp: photoDateTimeStampEnabled ? "On" : "Off"
         case .photoQuality: photoQuality.title
         case .shutterSound: camera.canSuppressShutterSound ? (shutterSoundEnabled ? "On" : "Off") : "Unavailable"
@@ -910,7 +1048,7 @@ struct ContentView: View {
                     .frame(height: 36)
                 Text(title).font(.caption)
             }
-            .foregroundStyle(selected ? .yellow : .white)
+            .foregroundStyle(selected ? cameraAccent : .white)
             .frame(maxWidth: .infinity)
         }
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -930,11 +1068,11 @@ struct ContentView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundStyle(.black)
                                 .frame(width: 14, height: 14)
-                            .background(camera.flashMode == .auto ? .yellow : .white, in: Circle())
+                            .background(camera.flashMode == .auto ? cameraAccent : .white, in: RoundedRectangle(cornerRadius: 14))
                         }
                     }
             }
-            .foregroundStyle(camera.flashMode == mode ? .yellow : .white)
+            .foregroundStyle(camera.flashMode == mode ? cameraAccent : .white)
             .frame(maxWidth: .infinity)
         }
         .accessibilityLabel("Flash \(title)")
@@ -960,7 +1098,7 @@ struct ContentView: View {
                     .frame(height: 36)
                 Text(seconds == 0 ? "Off" : "\(seconds)s").font(.caption)
             }
-            .foregroundStyle(timerSeconds == seconds ? .yellow : .white)
+            .foregroundStyle(timerSeconds == seconds ? cameraAccent : .white)
             .frame(maxWidth: .infinity)
         }
         .accessibilityLabel(seconds == 0 ? "Timer off" : "Timer \(seconds) seconds")
@@ -1016,27 +1154,12 @@ struct ContentView: View {
         countdownTask = nil
         countdownRemaining = nil
     }
-
-    private func modeButton(_ mode: CameraService.Mode, title: String) -> some View {
-        Button { camera.mode = mode } label: {
-            Text(title)
-                .font(.system(size: 14, weight: camera.mode == mode ? .semibold : .medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .foregroundStyle(camera.mode == mode ? .yellow : .white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(camera.mode == mode ? .white.opacity(0.1) : .clear, in: Capsule())
-                .overlay(Capsule().strokeBorder(camera.mode == mode ? .white.opacity(0.25) : .clear))
-        }
-        .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
-        .accessibilityAddTraits(camera.mode == mode ? .isSelected : [])
-    }
 }
 
 private struct ExposureRuler: View {
     @Binding var value: Float
     let range: ClosedRange<Float>
+    let tint: Color
     @State private var dragStartValue: Float?
     private let pointsPerEV: CGFloat = 40
 
@@ -1064,7 +1187,7 @@ private struct ExposureRuler: View {
                                  startPoint: .leading, endPoint: .trailing))
             .overlay {
                 Capsule()
-                    .fill(.yellow)
+                    .fill(tint)
                     .frame(width: 2, height: 26)
             }
             .contentShape(Rectangle())
