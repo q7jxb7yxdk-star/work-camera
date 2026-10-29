@@ -31,37 +31,32 @@ struct PhotoEditorView: View {
         GeometryReader { geometry in
             let isLandscape = geometry.size.width > geometry.size.height
             NavigationStack {
-                Group {
+                VStack(spacing: 12) {
+                    editorHeader
                     if isLandscape {
-                        HStack(spacing: 16) {
+                        HStack(spacing: 12) {
                             photoPreview
                             landscapeControls
                                 .frame(width: 216)
                         }
-                        .padding(8)
                     } else {
-                        VStack(spacing: 16) {
-                            photoPreview
-                            editingOptions(isLandscape: false)
-                                .padding(.horizontal, 16)
+                        photoPreview
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("PHOTO TOOLS", systemImage: "slider.horizontal.3")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.teal)
                             modeControls(isLandscape: false)
-                                .padding(.horizontal, 16)
+                            Divider()
+                            editingOptions(isLandscape: false)
                         }
-                        .padding(.vertical, 16)
+                        .padding(12)
+                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
+                .padding(12)
                 .background(Color(uiColor: .systemBackground))
-                .navigationTitle("Edit Photo")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    if !isLandscape {
-                        ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Save") { showSaveOptions = true }.disabled(isSaving)
-                        }
-                    }
-                }
-                .toolbar(isLandscape ? .hidden : .visible, for: .navigationBar)
+                .tint(.teal)
+                .toolbar(.hidden, for: .navigationBar)
                 .confirmationDialog("Save edited photo as HEIC", isPresented: $showSaveOptions, titleVisibility: .visible) {
                     Button("Overwrite Original", role: .destructive) { persist(overwrite: true) }
                     Button("Save as New Photo") { persist(overwrite: false) }
@@ -74,6 +69,26 @@ struct PhotoEditorView: View {
         }
         .preferredColorScheme(nil)
         .interactiveDismissDisabled()
+    }
+
+    private var editorHeader: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("WORK CAMERA")
+                    .font(.caption2.weight(.bold))
+                    .tracking(1)
+                    .foregroundStyle(.teal)
+                Text("Photo Tools").font(.headline)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Cancel") { dismiss() }
+                .buttonStyle(.bordered)
+            Button("Save") { showSaveOptions = true }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSaving)
+        }
+        .font(.subheadline.weight(.semibold))
+        .padding(.bottom, 4)
     }
 
     private var photoPreview: some View {
@@ -97,16 +112,14 @@ struct PhotoEditorView: View {
         VStack(spacing: 12) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    Label("PHOTO TOOLS", systemImage: "slider.horizontal.3")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.teal)
                     modeControls(isLandscape: true)
                     Divider()
                     editingOptions(isLandscape: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            HStack {
-                Button("Cancel") { dismiss() }
-                Spacer()
-                Button("Save") { showSaveOptions = true }.disabled(isSaving)
             }
         }
         .padding(12)
@@ -127,11 +140,13 @@ struct PhotoEditorView: View {
                     }
                 }
             } else {
-                HStack {
+                VStack(alignment: .leading, spacing: 8) {
                     drawingToolPicker
-                    ColorPicker("Ink color", selection: $inkColor, supportsOpacity: false)
-                        .labelsHidden()
-                    Button("Clear") { canvas.drawing = PKDrawing() }
+                    HStack {
+                        ColorPicker("Ink color", selection: $inkColor, supportsOpacity: false)
+                        Spacer()
+                        Button("Clear") { canvas.drawing = PKDrawing() }
+                    }
                 }
             }
         } else {
@@ -167,23 +182,36 @@ struct PhotoEditorView: View {
             VStack(alignment: .leading, spacing: 16) { modeButtons }
                 .buttonStyle(.borderless)
         } else {
-            HStack(spacing: 30) { modeButtons }
+            HStack(spacing: 8) { modeButtons }
                 .buttonStyle(.borderless)
         }
     }
 
     private var modeButtons: some View {
         Group {
-            Button { mode = .crop } label: { Label("Crop", systemImage: "crop") }
-                .tint(mode == .crop ? Color.accentColor : Color.primary)
-            Button { rotate() } label: { Label("Rotate", systemImage: "rotate.right") }
-                .tint(.primary)
-            Button {
+            toolButton("Crop", symbol: "crop", selected: mode == .crop) { mode = .crop }
+            toolButton("Rotate", symbol: "rotate.right", selected: false) { rotate() }
+            toolButton("Markup", symbol: "pencil.tip", selected: mode == .markup) {
                 if mode == .crop { applyCrop() }
                 mode = .markup
-            } label: { Label("Markup", systemImage: "pencil.tip.crop.circle") }
-                .tint(mode == .markup ? Color.accentColor : Color.primary)
+            }
         }
+    }
+
+    private func toolButton(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: symbol).font(.title3)
+                Text(title).font(.caption.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity, minHeight: 54)
+            .foregroundStyle(selected ? Color.teal : Color.primary)
+            .background(selected ? Color.teal.opacity(0.12) : Color(uiColor: .tertiarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(selected ? Color.teal : Color.secondary.opacity(0.2)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var selectedTool: PKTool {

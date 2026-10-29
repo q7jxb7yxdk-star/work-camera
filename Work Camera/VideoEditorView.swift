@@ -139,6 +139,7 @@ struct VideoEditorView: View {
                 }
             }
         }
+        .tint(.teal)
         .preferredColorScheme(nil)
         .interactiveDismissDisabled()
         .task { await loadVideo(); await loadThumbnails() }
@@ -157,66 +158,65 @@ struct VideoEditorView: View {
         }
     }
 
+    private var editorTitle: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("WORK CAMERA").font(.caption2.weight(.bold)).tracking(1)
+                .foregroundStyle(.teal)
+            Text("Video Tools").font(.subheadline.weight(.semibold))
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var header: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button("Cancel") { player?.pause(); dismiss() }
                 .disabled(isSaving)
-                .editorCapsule()
-            Spacer()
-            Button("Done") { player?.pause(); isPlaying = false; showSaveOptions = true }
+                .editorPanelButton()
+            editorTitle
+            Button("Save") { player?.pause(); isPlaying = false; showSaveOptions = true }
                 .disabled(unavailable || !hasEdits)
-                .editorCapsule()
+                .buttonStyle(.borderedProminent)
+                .frame(minHeight: 44)
         }
-        .font(.headline)
+        .font(.subheadline.weight(.semibold))
+        .padding(.vertical, 8)
     }
 
     private var landscapeHeader: some View {
         HStack(spacing: 12) {
-            Button { player?.pause(); dismiss() } label: {
-                Image(systemName: "xmark")
-            }
-            .editorCircle()
-            .disabled(isSaving)
-            .accessibilityLabel("Cancel")
+            Button("Cancel") { player?.pause(); dismiss() }
+                .editorPanelButton()
+                .disabled(isSaving)
+            editorTitle
             if mode == .video {
-                audioButton.editorCircle()
+                audioButton.editorPanelButton()
             } else {
-                HStack(spacing: 20) {
+                HStack(spacing: 16) {
                     rotateButton
-                    Button {
-                        quarterTurns = 0; resetCrop(); refreshPreview()
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                    }
-                    .accessibilityLabel("Reset crop and rotation")
+                    Button("Reset") { quarterTurns = 0; resetCrop(); refreshPreview() }
+                        .accessibilityLabel("Reset crop and rotation")
                 }
-                .font(.title3)
-                .editorCapsule()
+                .editorPanelButton()
                 .disabled(unavailable)
             }
-            Spacer(minLength: 12)
-            Button {
+            Button("Save") {
                 player?.pause(); isPlaying = false; showSaveOptions = true
-            } label: {
-                Image(systemName: "checkmark")
             }
-            .editorCircle()
+            .buttonStyle(.borderedProminent)
+            .frame(minHeight: 44)
             .disabled(unavailable || !hasEdits)
-            .accessibilityLabel("Done")
         }
-        .overlay {
-            if mode == .video {
-                Text("VIDEO").font(.subheadline).foregroundStyle(.secondary)
-                    .allowsHitTesting(false)
-            }
-        }
+        .font(.subheadline.weight(.semibold))
         .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     private var audioButton: some View {
         Button { removeAudio.toggle() } label: {
-            Image(systemName: removeAudio ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(removeAudio ? Color.yellow : Color.primary)
+            Label(removeAudio ? "Audio off" : "Audio on", systemImage: removeAudio ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .foregroundStyle(removeAudio ? Color.teal : Color.primary)
         }
         .disabled(unavailable)
         .accessibilityLabel(removeAudio ? "Restore audio" : "Remove audio")
@@ -233,55 +233,47 @@ struct VideoEditorView: View {
     }
 
     private var landscapeModePicker: some View {
-        VStack(spacing: 24) {
-            landscapeModeButton(.video, title: "Video", symbol: "video.fill")
+        VStack(alignment: .leading, spacing: 10) {
+            Text("TOOLS").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+            landscapeModeButton(.video, title: "Clip range", symbol: "timeline.selection")
             landscapeModeButton(.crop, title: "Crop", symbol: "crop.rotate")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 24)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12)))
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.trailing, 8)
         .disabled(unavailable)
     }
 
     private func landscapeModeButton(_ value: EditorMode, title: String, symbol: String) -> some View {
-        Button { mode = value } label: {
-            VStack(spacing: 6) {
-                Image(systemName: symbol).font(.system(size: 25))
-                Text(title).font(.caption)
-            }
-            .frame(width: 64, height: 58)
-            .foregroundStyle(mode == value ? Color.primary : Color.secondary)
-            .overlay(alignment: .leading) {
-                Image(systemName: "play.fill").font(.system(size: 6))
-                    .foregroundStyle(.yellow).opacity(mode == value ? 1 : 0)
-            }
+        modeButton(value, title: title, symbol: symbol)
+            .frame(width: 96)
+    }
+
+    private var clipRangeLabels: some View {
+        HStack {
+            Text("Start  \(timeLabel(start))")
+            Spacer()
+            Text("End  \(timeLabel(end))")
         }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(mode == value ? .isSelected : [])
+        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
     }
 
     private var landscapePlaybackControls: some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("CLIP RANGE", systemImage: "timeline.selection")
+                .font(.caption2.weight(.bold)).foregroundStyle(.teal)
             HStack(spacing: 0) {
-                playButton
-                    .frame(width: 56)
-                Rectangle().fill(Color.primary.opacity(0.15)).frame(width: 1, height: 52)
+                playButton.frame(width: 56)
                 EditorTrimTimeline(start: $start, end: $end, duration: duration,
                     minimumLength: minimumLength, endPreviewOffset: frameDuration.seconds,
-                    playbackTime: playbackTime, thumbnails: thumbnails, subduedStyle: true,
+                    playbackTime: playbackTime, thumbnails: thumbnails,
                     seek: { seconds, precise in requestSeek(to: seconds, precise: precise) },
                     editingChanged: setScrubbing)
             }
-            .padding(.vertical, 5)
-            .background(Color.secondary.opacity(0.22), in: RoundedRectangle(cornerRadius: 8))
-            HStack {
-                Text(timeLabel(start))
-                Spacer()
-                Text(timeLabel(end))
-            }
-            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            clipRangeLabels
         }
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         .disabled(unavailable)
     }
 
@@ -315,14 +307,14 @@ struct VideoEditorView: View {
                 Button {
                     removeAudio.toggle()
                 } label: {
-                    Image(systemName: removeAudio ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .frame(width: 28, height: 28)
+                    Label(removeAudio ? "Audio off" : "Audio on",
+                          systemImage: removeAudio ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 }
-                .foregroundStyle(removeAudio ? Color.yellow : Color.primary)
-                .editorCapsule()
+                .foregroundStyle(removeAudio ? Color.teal : Color.primary)
+                .editorPanelButton()
                 .accessibilityLabel(removeAudio ? "Restore audio" : "Remove audio")
                 Spacer()
-                Text("VIDEO").font(.subheadline).foregroundStyle(.secondary)
+                Text("CLIP TOOLS").font(.subheadline).foregroundStyle(.secondary)
                 Spacer()
                 Text(timeLabel(end - start)).font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -334,10 +326,10 @@ struct VideoEditorView: View {
                 } label: {
                     Image(systemName: "rotate.left").frame(width: 28, height: 28)
                 }
-                .editorCapsule()
+                .editorPanelButton()
                 .accessibilityLabel("Rotate 90 degrees")
                 Spacer()
-                Button("Reset") { quarterTurns = 0; resetCrop(); refreshPreview() }.editorCapsule()
+                Button("Reset") { quarterTurns = 0; resetCrop(); refreshPreview() }.editorPanelButton()
             }
         }
         .buttonStyle(.plain)
@@ -377,8 +369,10 @@ struct VideoEditorView: View {
     }
 
     private var playbackControls: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             if mode == .video {
+                Label("CLIP RANGE", systemImage: "timeline.selection")
+                    .font(.caption2.weight(.bold)).foregroundStyle(.teal)
                 HStack(spacing: 8) {
                     playButton
                     EditorTrimTimeline(start: $start, end: $end, duration: duration,
@@ -387,11 +381,7 @@ struct VideoEditorView: View {
                         seek: { seconds, precise in requestSeek(to: seconds, precise: precise) },
                         editingChanged: setScrubbing)
                 }
-                HStack {
-                    Text(timeLabel(start))
-                    Spacer()
-                    Text(timeLabel(end))
-                }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                clipRangeLabels
             } else {
                 HStack(spacing: 12) {
                     playButton
@@ -404,6 +394,8 @@ struct VideoEditorView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+        .padding(10)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         .disabled(unavailable)
     }
 
@@ -435,28 +427,25 @@ struct VideoEditorView: View {
     }
 
     private var modePicker: some View {
-        HStack(spacing: 28) {
-            modeButton(.video, title: "Video", symbol: "video")
+        HStack(spacing: 12) {
+            modeButton(.video, title: "Clip range", symbol: "timeline.selection")
             modeButton(.crop, title: "Crop", symbol: "crop.rotate")
         }
-        .padding(.horizontal, 28).padding(.vertical, 10)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12)))
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity)
         .disabled(unavailable)
     }
 
     private func modeButton(_ value: EditorMode, title: String, symbol: String) -> some View {
         Button { mode = value } label: {
-            VStack(spacing: 4) {
-                Image(systemName: "triangle.fill").font(.system(size: 6))
-                    .rotationEffect(.degrees(180)).foregroundStyle(.yellow)
-                    .opacity(mode == value ? 1 : 0)
-                Image(systemName: symbol).font(.title2)
-                Text(title).font(.caption)
-            }
-            .frame(minWidth: 60, minHeight: 52)
-            .foregroundStyle(mode == value ? Color.primary : Color.secondary)
+            Label(title, systemImage: symbol)
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .foregroundStyle(mode == value ? Color.teal : Color.primary)
+                .background(mode == value ? Color.teal.opacity(0.12) : Color(uiColor: .secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(mode == value ? Color.teal : Color.primary.opacity(0.12)))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(mode == value ? .isSelected : [])
@@ -755,20 +744,11 @@ private enum VideoEditingError: LocalizedError {
 }
 
 private extension View {
-    func editorCircle() -> some View {
+    func editorPanelButton() -> some View {
         self
-            .font(.system(size: 22, weight: .medium))
-            .frame(width: 52, height: 52)
-            .background(.regularMaterial, in: Circle())
-            .overlay(Circle().strokeBorder(Color.primary.opacity(0.12)))
-            .buttonStyle(.plain)
-    }
-
-    func editorCapsule() -> some View {
-        self
-            .padding(.horizontal, 18).frame(minHeight: 44)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12)))
+            .padding(.horizontal, 12).frame(minHeight: 44)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.teal.opacity(0.25)))
             .buttonStyle(.plain)
     }
 }
@@ -891,7 +871,7 @@ private struct EditorTrimTimeline: View {
                     path.addRect(CGRect(x: 0, y: 0, width: startX, height: 52))
                     path.addRect(CGRect(x: endX, y: 0, width: max(0, width - endX), height: 52))
                 }.fill(.black.opacity(0.6)).allowsHitTesting(false)
-                Rectangle().stroke(subduedStyle ? Color.primary.opacity(0.2) : .yellow, lineWidth: 3)
+                Rectangle().stroke(subduedStyle ? Color.teal.opacity(0.5) : .teal, lineWidth: 3)
                     .frame(width: selectedWidth, height: 52).offset(x: startX)
                     .allowsHitTesting(false)
                 // Playback accessibility is separate from the two trim endpoints.
@@ -950,11 +930,11 @@ private struct EditorTrimTimeline: View {
     private func trimHandle(isStart: Bool) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 4)
-                .fill(subduedStyle ? Color(uiColor: .secondarySystemFill) : .yellow)
+                .fill(subduedStyle ? Color.teal.opacity(0.3) : .teal)
                 .frame(width: 16, height: 58)
             Image(systemName: isStart ? "chevron.left" : "chevron.right")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(subduedStyle ? Color.primary : .black)
+                .foregroundStyle(subduedStyle ? Color.primary : .white)
         }
         .frame(width: 44, height: 64).contentShape(Rectangle())
         .accessibilityLabel(isStart ? "Trim start" : "Trim end")

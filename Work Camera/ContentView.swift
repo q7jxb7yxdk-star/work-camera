@@ -2420,41 +2420,58 @@ private struct MediaDetailView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            let landscape = geometry.size.width > geometry.size.height
-            ZStack {
-                viewerBackground
-                if item.kind == .video {
-                    videoViewer(containerSize: geometry.size, landscape: landscape)
-                } else {
-                    VStack(spacing: 0) {
-                        if photoControlsVisible { recordHeader }
+        GeometryReader { safeGeometry in
+            let landscape = safeGeometry.size.width > safeGeometry.size.height
+            GeometryReader { geometry in
+                ZStack {
+                    viewerBackground
+                    if item.kind == .video {
+                        videoViewer(containerSize: geometry.size, landscape: landscape)
+                    } else if landscape {
                         media
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        if photoControlsVisible { bottomBar }
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .overlay {
+                                if photoControlsVisible {
+                                    VStack(spacing: 0) {
+                                        recordHeader
+                                        Spacer(minLength: 0)
+                                        bottomBar
+                                    }
+                                    .padding(safeGeometry.safeAreaInsets)
+                                }
+                            }
+                    } else {
+                        VStack(spacing: 0) {
+                            if photoControlsVisible { recordHeader }
+                            media
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            if photoControlsVisible { bottomBar }
+                        }
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay {
-                if showDeleteConfirmation {
-                    ZStack(alignment: item.kind == .photo && landscape ? .topTrailing : .bottomTrailing) {
-                        Color.black.opacity(0.15)
-                            .ignoresSafeArea()
-                            .contentShape(Rectangle())
-                            .onTapGesture { cancelDeleteConfirmation() }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .overlay {
+                    if showDeleteConfirmation {
+                        ZStack(alignment: item.kind == .photo && landscape ? .topTrailing : .bottomTrailing) {
+                            Color.black.opacity(0.15)
+                                .ignoresSafeArea()
+                                .contentShape(Rectangle())
+                                .onTapGesture { cancelDeleteConfirmation() }
 
-                        detailDeleteConfirmation
-                            .frame(width: min(240, max(0, geometry.size.width - 48)))
-                            .padding(.trailing, item.kind == .photo && landscape
-                                     ? rightControlInset(in: geometry.size) : 24)
-                            .padding(.top, item.kind == .photo && landscape ? 8 : 0)
-                            .padding(.bottom, item.kind == .photo && landscape ? 0 : 16)
+                            detailDeleteConfirmation
+                                .frame(width: min(240, max(0, geometry.size.width - 48)))
+                                .padding(.trailing, item.kind == .photo && landscape
+                                         ? rightControlInset(in: geometry.size) : 24)
+                                .padding(.top, item.kind == .photo && landscape ? 8 : 0)
+                                .padding(.bottom, item.kind == .photo && landscape ? 0 : 16)
+                        }
                     }
                 }
             }
+            // Read control insets outside the full-screen photo container.
+            // Portrait controls retain the system safe area; landscape photo bounds stay fixed.
+            .ignoresSafeArea(.container, edges: item.kind == .photo && (landscape || !photoControlsVisible) ? .all : [])
         }
-        .ignoresSafeArea(.container, edges: item.kind == .photo && !photoControlsVisible ? .all : [])
         .statusBarHidden(item.kind == .photo && !photoControlsVisible)
         .toolbar(.hidden, for: .navigationBar)
         .preferredColorScheme(nil)
