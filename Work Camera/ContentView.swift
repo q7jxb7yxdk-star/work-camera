@@ -1312,11 +1312,11 @@ private struct LibraryView: View {
     }
 
     private var pageTitle: String {
-        if tab == .collections { return "Collections" }
+        if tab == .collections { return "Work Folders" }
         if tab == .templates { return "Templates" }
-        if tab == .search { return "Search" }
-        if albumScope == .unassigned { return "Not in an Album" }
-        return activeAlbum?.name ?? "Library"
+        if tab == .search { return "Find Records" }
+        if albumScope == .unassigned { return "Unfiled Records" }
+        return activeAlbum?.name ?? "Work Records"
     }
 
     private var scopedItems: [MediaItem] {
@@ -1434,19 +1434,19 @@ private struct LibraryView: View {
         } message: {
             Text(deleteErrorMessage ?? "Unknown error")
         }
-        .alert(renamingAlbumID == nil ? "New Album" : "Rename Album", isPresented: $showAlbumNamePrompt) {
-            TextField("Album Name", text: $albumName)
+        .alert(renamingAlbumID == nil ? "New Folder" : "Rename Folder", isPresented: $showAlbumNamePrompt) {
+            TextField("Folder Name", text: $albumName)
             Button("Cancel", role: .cancel) { }
             Button("Save") { saveAlbumName() }
                 .disabled(albumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .confirmationDialog("Delete Album: \(albumToDelete?.name ?? "")?",
+        .confirmationDialog("Delete Folder: \(albumToDelete?.name ?? "")?",
                             isPresented: $showAlbumDeleteConfirmation, titleVisibility: .visible) {
-            Button("Delete Album Only", role: .destructive) { deleteAlbum(includingMedia: false) }
-            Button("Delete Album, Photos and Videos", role: .destructive) { deleteAlbum(includingMedia: true) }
+            Button("Delete Folder Only", role: .destructive) { deleteAlbum(includingMedia: false) }
+            Button("Delete Folder, Photos and Videos", role: .destructive) { deleteAlbum(includingMedia: true) }
             Button("Cancel", role: .cancel) { albumToDelete = nil }
         } message: {
-            Text("Deleting only the album keeps its photos and videos. Deleting the album with its photos and videos permanently deletes the original files and related data, and removes them from every album. This cannot be undone.")
+            Text("Deleting only the folder keeps its photos and videos. Deleting the folder with its photos and videos permanently deletes the original files and related data, and removes them from every folder. This cannot be undone.")
         }
         .onChange(of: store.items) { _, _ in
             selectedIDs.formIntersection(Set(displayedItems.map(\.id)))
@@ -1568,99 +1568,107 @@ private struct LibraryView: View {
     }
 
     private func header(topInset: CGFloat) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            Button {
-                if albumScope != nil {
-                    resetSelection()
-                    albumScope = nil
-                    tab = .collections
-                    filter = .all
-                } else { close() }
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 21))
-                    .foregroundStyle(.primary)
-                    .frame(width: 52, height: 50)
-            }
-            .buttonStyle(.plain)
-            .frame(width: 50, height: 50)
-            .background(Color(uiColor: .secondarySystemBackground), in: Circle())
-            .overlay(Circle().strokeBorder(.gray.opacity(0.3)))
-            .accessibilityLabel(albumScope == nil ? "Back to Camera" : "Back to Collections")
-
-            VStack(alignment: .leading, spacing: 0) {
-                Text(pageTitle)
-                    .font(.system(size: 36, weight: .bold))
-                    .minimumScaleFactor(0.75)
-                    .lineLimit(1)
-                Text(tab == .templates
-                     ? "\(templates.count.formatted()) Templates"
-                     : "\((tab == .collections ? store.items.count : displayedItems.count).formatted()) Items")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            Spacer(minLength: 0)
-
-            if tab == .collections {
-                Button { promptForAlbumName() } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 23))
-                        .frame(width: 48, height: 48)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .accessibilityLabel("New Album")
-            } else if tab == .templates {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
                 Button {
-                    templateToEdit = ReportTemplate(id: UUID(), name: "", content: "")
+                    if albumScope != nil {
+                        resetSelection()
+                        albumScope = nil
+                        tab = .collections
+                        filter = .all
+                    } else { close() }
                 } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 23))
-                        .frame(width: 48, height: 48)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .accessibilityLabel("New Template")
-            } else {
-                Menu {
-                    ForEach(Filter.allCases, id: \.self) { option in
-                        Button {
-                            filter = option
-                            selectedIDs.removeAll()
-                        } label: {
-                            if filter == option {
-                                Label(option.rawValue, systemImage: "checkmark")
-                            } else {
-                                Text(option.rawValue)
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease")
-                        .font(.system(size: 23))
-                        .frame(width: 48, height: 48)
-                }
-                .accessibilityLabel("Filter items")
-                .background(.ultraThinMaterial, in: Circle())
-
-                Button {
-                    isSelecting.toggle()
-                    selectedIDs.removeAll()
-                } label: {
-                    if isSelecting {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 23, weight: .regular))
-                            .foregroundStyle(.primary)
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial, in: Circle())
-                            .overlay(Circle().strokeBorder(.gray.opacity(0.3), lineWidth: 1))
-                    } else {
-                        Text("Select")
-                            .font(.system(size: 17))
-                            .padding(.horizontal, 18)
-                            .frame(height: 48)
-                            .background(.ultraThinMaterial, in: Capsule())
-                    }
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 21))
+                        .foregroundStyle(.primary)
+                        .frame(width: 52, height: 50)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(isSelecting ? "Cancel selection" : "Select")
+                .frame(width: 50, height: 50)
+                .background(Color(uiColor: .secondarySystemBackground), in: Circle())
+                .overlay(Circle().strokeBorder(.gray.opacity(0.3)))
+                .accessibilityLabel(albumScope == nil ? "Camera" : "Back to Folders")
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("WORK CAMERA")
+                        .font(.caption.weight(.bold))
+                        .tracking(2)
+                        .foregroundStyle(.teal)
+                    Text(pageTitle)
+                        .font(.system(size: 26, weight: .bold))
+                        .minimumScaleFactor(0.75)
+                        .lineLimit(1)
+                    Text(tab == .templates
+                         ? "\(templates.count.formatted()) Templates"
+                         : "\((tab == .collections ? store.items.count : displayedItems.count).formatted()) Items")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 12) {
+                Spacer(minLength: 0)
+                if tab == .collections {
+                    Button { promptForAlbumName() } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 23))
+                            .frame(width: 48, height: 48)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .accessibilityLabel("New Folder")
+                } else if tab == .templates {
+                    Button {
+                        templateToEdit = ReportTemplate(id: UUID(), name: "", content: "")
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 23))
+                            .frame(width: 48, height: 48)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .accessibilityLabel("New Template")
+                } else {
+                    Menu {
+                        ForEach(Filter.allCases, id: \.self) { option in
+                            Button {
+                                filter = option
+                                selectedIDs.removeAll()
+                            } label: {
+                                if filter == option {
+                                    Label(option.rawValue, systemImage: "checkmark")
+                                } else {
+                                    Text(option.rawValue)
+                                }
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease")
+                            .font(.system(size: 23))
+                            .frame(width: 48, height: 48)
+                    }
+                    .accessibilityLabel("Filter items")
+                    .background(.ultraThinMaterial, in: Circle())
+
+                    Button {
+                        isSelecting.toggle()
+                        selectedIDs.removeAll()
+                    } label: {
+                        if isSelecting {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 23, weight: .regular))
+                                .foregroundStyle(.primary)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial, in: Circle())
+                                .overlay(Circle().strokeBorder(.gray.opacity(0.3), lineWidth: 1))
+                        } else {
+                            Label("Choose", systemImage: "checklist")
+                                .font(.system(size: 17))
+                                .padding(.horizontal, 18)
+                                .frame(height: 48)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSelecting ? "Cancel selection" : "Choose records")
+                }
             }
         }
         .padding(.horizontal, 16)
@@ -1671,92 +1679,124 @@ private struct LibraryView: View {
         .foregroundStyle(.primary)
     }
 
+    @ScaledMetric(relativeTo: .caption2) private var recordCaptionHeight: CGFloat = 44
+
+    private let recordColumnCount = 4
+
     private var grid: some View {
         let items = displayedItems
-        return ScrollView {
-            if items.isEmpty {
-                ContentUnavailableView(
-                    albumScope != nil ? "No Items in This Album" : store.items.isEmpty ? "No captures yet" : "No matching items",
-                    systemImage: "photo.on.rectangle",
-                    description: Text(albumScope != nil
-                                      ? "Select photos or videos in Library to add them to an album, or check the current filter."
-                                      : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
-                )
-                .padding(.top, 60)
-            } else {
-                // Keep real cells mounted so each visible thumbnail can load independently.
-                LazyVGrid(
-                    columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 5),
-                    spacing: 2
-                ) {
-                    ForEach(items) { item in
-                        Button {
-                            if isSelecting {
-                                if !selectedIDs.insert(item.id).inserted {
-                                    selectedIDs.remove(item.id)
-                                }
-                            } else {
-                                detailItem = item
-                            }
-                        } label: {
-                            tile(for: item)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(item.filename)
-                        .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
-                    }
-                }
-                .background {
-                    LibrarySelectionGesture(
-                        isEnabled: isSelecting,
-                        canStart: { point, width in
-                            selectionIndex(at: point, width: width, count: items.count) != nil
-                        },
-                        onChange: { start, current, width in
-                            updateDragSelection(start: start, current: current, width: width, items: items)
-                        },
-                        onEnd: { dragSelection = nil }
+        return GeometryReader { geometry in
+            let contentWidth = max(0, geometry.size.width - 32)
+            let columns = recordColumnCount
+            let tileWidth = max(0, (contentWidth - CGFloat(columns - 1) * 12) / CGFloat(columns))
+            ScrollView {
+                if items.isEmpty {
+                    ContentUnavailableView(
+                        albumScope != nil ? "No Items in This Folder" : store.items.isEmpty ? "No captures yet" : "No matching items",
+                        systemImage: "photo.on.rectangle",
+                        description: Text(albumScope != nil
+                                          ? "Select photos or videos in Records to add them to a folder, or check the current filter."
+                                          : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
                     )
+                    .padding(.top, 60)
+                } else {
+                    // Keep real cells mounted so each visible thumbnail can load independently.
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: columns),
+                        spacing: 12
+                    ) {
+                        ForEach(items) { item in
+                            Button {
+                                if isSelecting {
+                                    if !selectedIDs.insert(item.id).inserted {
+                                        selectedIDs.remove(item.id)
+                                    }
+                                } else {
+                                    detailItem = item
+                                }
+                            } label: {
+                                tile(for: item, width: tileWidth)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(item.filename)
+                            .accessibilityAddTraits(isSelecting && selectedIDs.contains(item.id) ? .isSelected : [])
+                        }
+                    }
+                    .background {
+                        LibrarySelectionGesture(
+                            isEnabled: isSelecting,
+                            canStart: { point, width in
+                                selectionIndex(at: point, width: width, count: items.count) != nil
+                            },
+                            onChange: { start, current, width in
+                                updateDragSelection(start: start, current: current, width: width, items: items)
+                            },
+                            onEnd: { dragSelection = nil }
+                        )
+                    }
+                    .padding(16)
                 }
             }
+            .scrollIndicators(.hidden)
+            .background(Color(uiColor: .systemBackground))
+            .foregroundStyle(.primary)
         }
-        .scrollIndicators(.hidden)
-        .background(Color(uiColor: .systemBackground))
-        .foregroundStyle(.primary)
     }
 
-    private func tile(for item: MediaItem) -> some View {
-        GeometryReader { geometry in
-            MediaThumbnail(item: item)
-                .frame(width: geometry.size.width, height: geometry.size.height)
+    private func tile(for item: MediaItem, width: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            CollectionThumbnail(item: item, pointSize: width)
+                .frame(width: width, height: width)
                 .clipped()
                 .overlay(alignment: .bottomTrailing) {
                     if item.kind == .video {
-                        VideoDurationBadge(item: item)
-                            .padding(.trailing, 4)
-                            .padding(.bottom, 4)
+                        VideoDurationBadge(item: item).padding(6)
                     }
                 }
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: .topTrailing) {
                     if isSelecting {
-                        Image(systemName: selectedIDs.contains(item.id) ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 20))
-                            .foregroundStyle(selectedIDs.contains(item.id) ? .blue : .white)
-                            .shadow(color: .black.opacity(0.7), radius: 2)
-                            .padding(4)
+                        Image(systemName: selectedIDs.contains(item.id) ? "checkmark.square.fill" : "square")
+                            .font(.title3)
+                            .foregroundStyle(.white)
+                            .padding(8)
+                            .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                            .padding(6)
+                            .accessibilityHidden(true)
                     }
                 }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.createdAt.formatted(date: .numeric, time: .omitted))
+                Text(item.createdAt.formatted(date: .omitted, time: .shortened))
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            .padding(.horizontal, 6)
+            .frame(width: width, height: recordCaptionHeight, alignment: .leading)
         }
-        .aspectRatio(1, contentMode: .fit)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(selectedIDs.contains(item.id) && isSelecting ? Color.teal : Color.teal.opacity(0.2),
+                              lineWidth: selectedIDs.contains(item.id) && isSelecting ? 2 : 1)
+        }
     }
 
-    // Matches the five square columns and two-point gaps in the grid above.
+    // Use the same columns, square preview, scaled caption and gaps as the visible grid.
     private func selectionIndex(at point: CGPoint, width: CGFloat, count: Int) -> Int? {
         guard width > 0, count > 0, point.x >= 0, point.x < width, point.y >= 0 else { return nil }
-        let pitch = (width + 2) / 5
-        let column = min(4, Int(point.x / pitch))
-        let row = Int(point.y / pitch)
-        let index = row * 5 + column
+        let columns = recordColumnCount
+        let tileWidth = (width - CGFloat(columns - 1) * 12) / CGFloat(columns)
+        guard tileWidth > 0 else { return nil }
+        let column = Int(point.x / (tileWidth + 12))
+        let tileHeight = tileWidth + recordCaptionHeight
+        let row = Int(point.y / (tileHeight + 12))
+        guard column < columns,
+              point.x - CGFloat(column) * (tileWidth + 12) < tileWidth,
+              point.y - CGFloat(row) * (tileHeight + 12) < tileHeight else { return nil }
+        let index = row * columns + column
         return index < count ? index : nil
     }
 
@@ -1781,21 +1821,23 @@ private struct LibraryView: View {
 
     private var collections: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                    collectionCard(.photos, symbol: "photo.on.rectangle")
+            VStack(alignment: .leading, spacing: 14) {
+                Text("BROWSE BY FORMAT").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    collectionCard(.photos, symbol: "camera")
                     collectionCard(.videos, symbol: "video")
                 }
-                Text("Albums").font(.title2.bold())
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
-                    albumCard(name: "Not in an Album", items: store.unassignedItems,
+                Text("WORK FOLDERS").font(.caption.weight(.bold)).foregroundStyle(.secondary)
+                    .padding(.top, 12)
+                LazyVStack(spacing: 12) {
+                    albumCard(name: "Unfiled Records", items: store.unassignedItems,
                               symbol: "tray", scope: .unassigned)
                     ForEach(store.albums) { album in
                         albumCard(name: album.name, items: store.items(in: album),
-                                  symbol: "rectangle.stack", scope: .album(album.id))
+                                  symbol: "folder", scope: .album(album.id))
                             .contextMenu {
-                                Button("Rename Album", systemImage: "pencil") { promptForAlbumName(album) }
-                                Button("Delete Album", systemImage: "trash", role: .destructive) {
+                                Button("Rename Folder", systemImage: "pencil") { promptForAlbumName(album) }
+                                Button("Delete Folder", systemImage: "trash", role: .destructive) {
                                     confirmAlbumDeletion(album)
                                 }
                             }
@@ -1809,28 +1851,6 @@ private struct LibraryView: View {
         .foregroundStyle(.primary)
     }
 
-    private func collectionCover(items: [MediaItem], symbol: String) -> some View {
-        let newestPhoto = items.filter { $0.kind == .photo }.max { $0.createdAt < $1.createdAt }
-        let cover = newestPhoto ?? items.max { $0.createdAt < $1.createdAt }
-        return GeometryReader { geometry in
-            ZStack {
-                Color(uiColor: .tertiarySystemFill)
-                if let cover {
-                    CollectionThumbnail(item: cover, pointSize: geometry.size.width)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .clipped()
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 30))
-                }
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .accessibilityHidden(true)
-    }
-
     private func albumCard(name: String, items: [MediaItem], symbol: String, scope: AlbumScope) -> some View {
         Button {
             resetSelection()
@@ -1838,12 +1858,20 @@ private struct LibraryView: View {
             filter = .all
             tab = .library
         } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                collectionCover(items: items, symbol: symbol)
-                Text(name).font(.headline).lineLimit(2)
-                Text("\(items.count) Items").font(.subheadline).foregroundStyle(.secondary)
+            HStack(spacing: 16) {
+                Image(systemName: symbol).font(.title2).foregroundStyle(.teal)
+                    .frame(width: 48, height: 48)
+                    .background(.teal.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(name).font(.headline).lineLimit(2)
+                    Text("\(items.count) records").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").foregroundStyle(.secondary)
             }
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
     }
@@ -1857,12 +1885,12 @@ private struct LibraryView: View {
             tab = .library
         } label: {
             VStack(alignment: .leading, spacing: 8) {
-                collectionCover(items: items, symbol: symbol)
-                Text(collection.rawValue).font(.headline)
-                Text("\(items.count) Items")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Label(collection.rawValue, systemImage: symbol).font(.headline)
+                Text("\(items.count) records").font(.subheadline).foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         }
         .buttonStyle(.plain)
     }
@@ -1898,17 +1926,17 @@ private struct LibraryView: View {
                         Button("Add to \(album.name)") { updateSelectedAlbum(album.id, adding: true) }
                     }
                     if store.albums.isEmpty {
-                        Text("Create an album in Collections first")
+                        Text("Create a folder in Folders first")
                     }
                     if let album = activeAlbum {
-                        Button("Remove from This Album") { updateSelectedAlbum(album.id, adding: false) }
+                        Button("Remove from This Folder") { updateSelectedAlbum(album.id, adding: false) }
                     }
                 } label: {
                     Image(systemName: "folder.badge.plus")
                         .font(.system(size: 22))
                         .frame(width: 48, height: 48)
                 }
-                .accessibilityLabel("Album Actions")
+                .accessibilityLabel("Folder Actions")
                 .disabled(selectedIDs.isEmpty)
                 Button {
                     showDeleteConfirmation = true
@@ -1925,28 +1953,12 @@ private struct LibraryView: View {
                 .disabled(selectedIDs.isEmpty)
                 .opacity(selectedIDs.isEmpty ? 0.4 : 1)
             } else {
-                HStack(spacing: 0) {
-                    tabButton(.library, symbol: "photo.on.rectangle.fill", title: "Library")
-                    tabButton(.collections, symbol: "square.stack.fill", title: "Collections")
+                HStack(spacing: 4) {
+                    tabButton(.library, symbol: "list.bullet.rectangle", title: "Records")
+                    tabButton(.collections, symbol: "folder", title: "Folders")
                     tabButton(.templates, symbol: "doc.text", title: "Templates")
+                    tabButton(.search, symbol: "magnifyingglass", title: "Find")
                 }
-                .padding(4)
-                .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                .overlay(Capsule().strokeBorder(.gray.opacity(0.3)))
-                Spacer(minLength: 8)
-                Button {
-                    resetSelection()
-                    albumScope = nil
-                    tab = .search
-                    filter = .all
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 27))
-                        .frame(width: 52, height: 52)
-                        .background(tab == .search ? Color(uiColor: .tertiarySystemFill) : Color(uiColor: .secondarySystemBackground), in: Circle())
-                        .overlay(Circle().strokeBorder(.gray.opacity(0.3)))
-                }
-                .accessibilityLabel("Search")
             }
         }
         .padding(.horizontal, 16)
@@ -2003,7 +2015,7 @@ private struct LibraryView: View {
                     showDeleteConfirmation = false
                     updateSelectedAlbum(album.id, adding: false)
                 } label: {
-                    Text("Remove from Album")
+                    Text("Remove from Folder")
                         .font(.system(size: 17, weight: .semibold))
                         .frame(maxWidth: .infinity, minHeight: 48)
                         .background(.quaternary, in: Capsule())
@@ -2098,12 +2110,12 @@ private struct LibraryView: View {
                 Image(systemName: symbol).font(.system(size: 24))
                 Text(title).font(.system(size: 12, weight: .medium))
             }
-            .foregroundStyle(tab == target ? Color.blue : Color.primary)
+            .foregroundStyle(tab == target ? Color.teal : Color.primary)
             .lineLimit(1)
             .minimumScaleFactor(0.8)
             .frame(maxWidth: .infinity)
             .frame(height: 56)
-            .background(tab == target ? Color(uiColor: .tertiarySystemFill) : .clear, in: Capsule())
+            .background(tab == target ? Color(uiColor: .tertiarySystemFill) : .clear, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
     }
@@ -2397,7 +2409,7 @@ private struct MediaDetailView: View {
     }
     private var controlShadow: Color { isDark ? .clear : .black.opacity(0.08) }
     private var reportAccent: Color {
-        isDark ? Color(red: 0.52, green: 0.73, blue: 1) : .blue
+        isDark ? Color(red: 0.4, green: 0.85, blue: 0.78) : .teal
     }
 
     private var favoriteKey: String {
@@ -2411,16 +2423,9 @@ private struct MediaDetailView: View {
                 viewerBackground
                 if item.kind == .video {
                     videoViewer(containerSize: geometry.size, landscape: landscape)
-                } else if landscape {
-                    media
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                    VStack(spacing: 0) {
-                        topBar(landscape: true, containerSize: geometry.size)
-                        Spacer(minLength: 0)
-                    }
                 } else {
                     VStack(spacing: 0) {
-                        topBar(landscape: false, containerSize: geometry.size)
+                        recordHeader
                         media
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         bottomBar
@@ -2551,8 +2556,8 @@ private struct MediaDetailView: View {
                     toggleVideoControls()
                 }
             VStack(spacing: 0) {
-                // Keep the same three floating controls in both orientations.
-                topBar(landscape: false, containerSize: containerSize)
+                // Keep the record header and labeled report actions available in both orientations.
+                recordHeader
                 Spacer(minLength: 12)
                 videoPlaybackControls
                     .padding(.horizontal, landscape ? 48 : 24)
@@ -2674,51 +2679,31 @@ private struct MediaDetailView: View {
         isPlaying = player.rate > 0
     }
 
-    private func topBar(landscape: Bool, containerSize: CGSize) -> some View {
-        Group {
-            if landscape {
-                ZStack {
-                    titlePill
-                    HStack(spacing: 8) {
-                        roundButton("chevron.left", label: "Back to Library") { dismiss() }
-                        HStack(spacing: 0) {
-                            iconButton("square.and.arrow.up", label: "Share Media", action: share)
-                            reportButton
-                        }
-                        .background(controlSurface, in: Capsule())
-                        .overlay(Capsule().strokeBorder(controlBorder))
-                        .shadow(color: controlShadow, radius: 10, y: 5)
-
-                        Spacer(minLength: 8)
-
-                        HStack(spacing: 0) {
-                            iconButton("info.circle", label: "Info") { showInfo = true }
-                            editButton
-                            iconButton("trash", label: "Delete capture") { requestDeleteConfirmation() }
-                            moreMenu
-                        }
-                        .background(controlSurface, in: Capsule())
-                        .overlay(Capsule().strokeBorder(controlBorder))
-                        .shadow(color: controlShadow, radius: 10, y: 5)
-                        .padding(.trailing, rightControlInset(in: containerSize) - 24)
-                    }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    roundButton("chevron.left", label: "Back to Library") { dismiss() }
-                    Spacer(minLength: 8)
-                    titlePill
-                    Spacer(minLength: 8)
-                    moreMenu
-                        .background(controlSurface, in: Circle())
-                        .overlay(Circle().strokeBorder(controlBorder))
-                        .shadow(color: controlShadow, radius: 10, y: 5)
-                }
+    private var recordHeader: some View {
+        HStack(spacing: 12) {
+            Button { dismiss() } label: {
+                Label("Records", systemImage: "arrow.left")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: 44)
             }
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("WORK CAMERA / RECORD")
+                    .font(.caption2.weight(.bold))
+                    .tracking(1)
+                    .foregroundStyle(reportAccent)
+                Text(item.filename)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            moreMenu
         }
-        .padding(.horizontal, landscape ? 24 : 16)
-        .padding(.top, landscape ? 8 : 14)
-        .padding(.bottom, 8)
+        .foregroundStyle(controlText)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(viewerBackground.opacity(0.94))
     }
 
     private func rightControlInset(in containerSize: CGSize) -> CGFloat {
@@ -2742,41 +2727,57 @@ private struct MediaDetailView: View {
         return max(24, (rightGutter - actionWidth) / 2)
     }
 
-    private var titlePill: some View {
-        VStack(spacing: 1) {
-            Text(item.filename)
-                .font(.system(size: 16, weight: .semibold))
-                .lineLimit(1)
-            Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
-                .font(.system(size: 13))
-                .lineLimit(1)
+    private var bottomBar: some View {
+        VStack(spacing: 10) {
+            Button {
+                restartVideoControlsTimeout()
+                showReport = true
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "doc.text").font(.title3)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Work Report").font(.subheadline.weight(.bold))
+                        Text(report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                             ? "Add notes for this record" : "View or update saved notes")
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right")
+                }
+                .padding(12)
+                .foregroundStyle(controlText)
+                .background(reportAccent.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+            }
+            HStack(spacing: 8) {
+                recordAction("Share", symbol: "square.and.arrow.up", action: share)
+                recordAction("Details", symbol: "list.bullet.rectangle") { showInfo = true }
+                recordAction("Edit", symbol: "pencil", action: openEditor)
+                    .disabled(item.kind == .photo && photoImage == nil)
+                recordAction("Delete", symbol: "trash") { requestDeleteConfirmation() }
+            }
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, 16)
-        .frame(maxWidth: 220, minHeight: 52)
-        .foregroundStyle(controlText)
-        .background(controlSurface, in: Capsule())
-        .overlay(Capsule().strokeBorder(controlBorder))
-        .shadow(color: controlShadow, radius: 10, y: 5)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
+        .background(viewerBackground.opacity(0.94))
     }
 
-    private var bottomBar: some View {
-        HStack {
-            roundButton("square.and.arrow.up", label: "Share Media", action: share)
-            Spacer(minLength: 4)
-            HStack(spacing: 0) {
-                reportButton
-                iconButton("info.circle", label: "Info") { showInfo = true }
-                editButton
+    private func recordAction(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button {
+            restartVideoControlsTimeout()
+            action()
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 18))
+                Text(title).font(.caption2.weight(.semibold))
             }
-            .background(controlSurface, in: Capsule())
-            .overlay(Capsule().strokeBorder(controlBorder))
-            .shadow(color: controlShadow, radius: 8, y: 3)
-            Spacer(minLength: 4)
-            roundButton("trash", label: "Delete capture") { requestDeleteConfirmation() }
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .foregroundStyle(controlText)
+            .background(controlFill, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(controlBorder))
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 12)
-        .padding(.bottom, 16)
     }
 
     private func requestDeleteConfirmation() {
@@ -3159,7 +3160,7 @@ private struct MediaDetailView: View {
                 .padding(16)
             }
             .background(Color(uiColor: .systemBackground))
-            .navigationTitle("Info")
+            .navigationTitle("Record Details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -3192,97 +3193,43 @@ private struct MediaDetailView: View {
     }
 
     private var infoSummaryCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(item.kind == .photo ? photoInfo.captured : videoInfo.captured)
-                    .font(.subheadline)
-                Text(item.filename).font(.subheadline).foregroundStyle(.secondary)
-            }
-            .padding(16)
+        VStack(alignment: .leading, spacing: 12) {
+            Label("RECORD DETAILS", systemImage: "list.bullet.rectangle")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.teal)
+            infoRecordRow("File", item.filename)
+            infoRecordRow("Captured", item.kind == .photo ? photoInfo.captured : videoInfo.captured)
+            infoRecordRow("Device", item.kind == .photo ? photoInfo.device : videoInfo.device)
+            infoRecordRow("Format", item.kind == .photo ? photoInfo.format : videoInfo.format)
+            infoRecordRow("Resolution", item.kind == .photo ? photoInfo.resolution : videoInfo.resolution)
+            infoRecordRow("File size", item.kind == .photo ? photoInfo.fileSize : videoInfo.fileSize)
             Divider()
-            HStack(alignment: .center, spacing: 8) {
-                Text(item.kind == .photo ? photoInfo.device : videoInfo.device)
-                    .font(.subheadline)
-                Spacer(minLength: 8)
-                Text(item.kind == .photo ? photoInfo.format : videoInfo.format)
-                    .font(.subheadline)
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(infoBadgeColor, in: Capsule())
-                if item.kind == .video {
-                    Image(systemName: "video")
-                        .font(.subheadline)
-                        .padding(.horizontal, 5).padding(.vertical, 4)
-                        .background(infoBadgeColor, in: Capsule())
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
             if item.kind == .photo {
-                Divider()
-                HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("\(photoInfo.lens) — \(photoInfo.lensFocalLength) ƒ\(photoInfo.aperture)")
-                            .font(.subheadline)
-                        Text("\(photoInfo.resolution) • \(photoInfo.fileSize)")
-                            .font(.subheadline)
-                    }
-                    Spacer(minLength: 8)
-                    Text("STANDARD")
-                        .font(.subheadline)
-                        .fixedSize()
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(infoBadgeColor, in: Capsule())
-                }
-                .foregroundStyle(.secondary)
-                .padding(16)
-                Divider()
-                HStack(spacing: 0) {
-                    infoExposureValue("ISO \(photoInfo.iso)")
-                    Divider()
-                    infoExposureValue(photoInfo.focalLength)
-                    Divider()
-                    infoExposureValue("\(photoInfo.exposureBias) ev")
-                    Divider()
-                    infoExposureValue("ƒ\(photoInfo.aperture)")
-                    Divider()
-                    infoExposureValue(photoInfo.shutter)
-                }
-                .frame(height: 24)
-                .padding(.vertical, 16)
-                .padding(.horizontal, 6)
+                infoRecordRow("Lens", photoInfo.lens)
+                infoRecordRow("Focal length", photoInfo.focalLength)
+                infoRecordRow("35 mm equivalent", photoInfo.lensFocalLength)
+                infoRecordRow("ISO", photoInfo.iso)
+                infoRecordRow("Aperture", "ƒ\(photoInfo.aperture)")
+                infoRecordRow("Shutter", photoInfo.shutter)
+                infoRecordRow("Exposure bias", "\(photoInfo.exposureBias) ev")
             } else {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(videoLensSummary)
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 6) {
-                            Text("\(videoInfo.resolution) • \(videoInfo.fileSize) •")
-                            Label(videoInfo.dynamicRange, systemImage: "tv")
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(videoInfo.resolution) • \(videoInfo.fileSize)")
-                            Label(videoInfo.dynamicRange, systemImage: "tv")
-                        }
-                    }
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(16)
-                Divider()
-                HStack(spacing: 0) {
-                    Text(videoInfo.frameRate).frame(maxWidth: .infinity)
-                    Divider()
-                    Text(videoInfo.duration).frame(maxWidth: .infinity)
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .frame(height: 20)
-                .padding(.vertical, 16)
+                infoRecordRow("Lens", videoLensSummary)
+                infoRecordRow("Dynamic range", videoInfo.dynamicRange)
+                infoRecordRow("Frame rate", videoInfo.frameRate)
+                infoRecordRow("Duration", videoInfo.duration)
             }
         }
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(infoCardColor, in: RoundedRectangle(cornerRadius: 26))
+        .background(infoCardColor, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func infoRecordRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.subheadline).textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var videoLensSummary: String {
