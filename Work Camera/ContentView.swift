@@ -2357,6 +2357,7 @@ private struct MediaDetailView: View {
     @State private var isMuted = true
     @State private var isSeeking = false
     @State private var resumeAfterSeeking = false
+    @State private var photoControlsVisible = true
     @State private var videoControlsVisible = true
     @State private var videoControlsHideAt: Date?
     @State private var report = ""
@@ -2398,7 +2399,9 @@ private struct MediaDetailView: View {
     }
 
     private var isDark: Bool { item.kind == .video || colorScheme == .dark }
-    private var viewerBackground: Color { isDark ? .black : .white }
+    private var viewerBackground: Color {
+        isDark || (item.kind == .photo && !photoControlsVisible) ? .black : .white
+    }
     private var controlFill: Color { isDark ? Color(white: 0.14) : .white.opacity(0.88) }
     private var controlSurface: AnyShapeStyle {
         item.kind == .video ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(controlFill)
@@ -2425,10 +2428,10 @@ private struct MediaDetailView: View {
                     videoViewer(containerSize: geometry.size, landscape: landscape)
                 } else {
                     VStack(spacing: 0) {
-                        recordHeader
+                        if photoControlsVisible { recordHeader }
                         media
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        bottomBar
+                        if photoControlsVisible { bottomBar }
                     }
                 }
             }
@@ -2451,11 +2454,14 @@ private struct MediaDetailView: View {
                 }
             }
         }
+        .ignoresSafeArea(.container, edges: item.kind == .photo && !photoControlsVisible ? .all : [])
+        .statusBarHidden(item.kind == .photo && !photoControlsVisible)
         .toolbar(.hidden, for: .navigationBar)
         .preferredColorScheme(nil)
         .onAppear {
             loadTemplates()
             loadSelection()
+            photoControlsVisible = true
             videoControlsVisible = true
             restartVideoControlsTimeout()
         }
@@ -2524,11 +2530,14 @@ private struct MediaDetailView: View {
     @ViewBuilder
     private var media: some View {
         if let photoImage, item.kind == .photo {
-            ZoomablePhotoSurface(image: photoImage) { direction in
+            ZoomablePhotoSurface(image: photoImage, onTap: { photoControlsVisible.toggle() }) { direction in
                 selectAdjacentMedia(offset: direction == .left ? 1 : -1)
             }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel(item.filename)
+                .accessibilityAction(named: photoControlsVisible ? "Hide controls" : "Show controls") {
+                    photoControlsVisible.toggle()
+                }
                 .accessibilityAction(named: "Previous Media") { selectAdjacentMedia(offset: -1) }
                 .accessibilityAction(named: "Next Media") { selectAdjacentMedia(offset: 1) }
         } else if let player, item.kind == .video {
@@ -3885,6 +3894,7 @@ private struct MediaDetailView: View {
 
 private struct ZoomablePhotoSurface: UIViewRepresentable {
     let image: UIImage
+    let onTap: () -> Void
     let onSwipe: (UISwipeGestureRecognizer.Direction) -> Void
 
     func makeUIView(context: Context) -> ZoomablePhotoView {
@@ -3892,6 +3902,7 @@ private struct ZoomablePhotoSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ZoomablePhotoView, context: Context) {
+        view.onTap = onTap
         view.onSwipe = onSwipe
         view.display(image)
     }
@@ -3901,6 +3912,7 @@ private final class ZoomablePhotoView: UIView, UIScrollViewDelegate, UIGestureRe
     private let scrollView = UIScrollView()
     private let imageView = UIImageView()
     private var fittedSize: CGSize = .zero
+    var onTap: (() -> Void)?
     var onSwipe: ((UISwipeGestureRecognizer.Direction) -> Void)?
 
     override init(frame: CGRect) {
@@ -3916,11 +3928,19 @@ private final class ZoomablePhotoView: UIView, UIScrollViewDelegate, UIGestureRe
         addSubview(scrollView)
         scrollView.addSubview(imageView)
 
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+        tap.cancelsTouchesInView = false
+        scrollView.addGestureRecognizer(tap)
+        if let pinch = scrollView.pinchGestureRecognizer {
+            tap.require(toFail: pinch)
+        }
+
         for direction: UISwipeGestureRecognizer.Direction in [.left, .right] {
             let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
             swipe.direction = direction
             swipe.delegate = self
             scrollView.addGestureRecognizer(swipe)
+            tap.require(toFail: swipe)
             // A fitted photo pages; an enlarged photo uses the native scroll pan.
             scrollView.panGestureRecognizer.require(toFail: swipe)
             if let pinch = scrollView.pinchGestureRecognizer {
@@ -3973,6 +3993,8 @@ private final class ZoomablePhotoView: UIView, UIScrollViewDelegate, UIGestureRe
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         scrollView.zoomScale <= scrollView.minimumZoomScale + 0.01
     }
+
+    @objc private func tapped() { onTap?() }
 
     @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {
         guard scrollView.zoomScale <= scrollView.minimumZoomScale + 0.01 else { return }
