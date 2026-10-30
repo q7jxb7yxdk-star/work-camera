@@ -9,9 +9,9 @@ enum CameraQuickAction: String, CaseIterable {
 
     var title: String {
         switch self {
-        case .library: "Library"
-        case .collections: "Collections"
-        case .templates: "Templates"
+        case .library: "Photos"
+        case .collections: "Folders"
+        case .templates: "Reports"
         }
     }
 

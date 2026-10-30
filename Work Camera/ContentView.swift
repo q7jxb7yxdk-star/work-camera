@@ -685,7 +685,7 @@ struct ContentView: View {
             .frame(width: width, height: width)
             .background(cameraBackground, in: RoundedRectangle(cornerRadius: 10))
         }
-        .accessibilityLabel("Open Library")
+        .accessibilityLabel("Open Photos")
         .disabled(camera.isBusy || camera.isRecording || countdownRemaining != nil)
     }
 
@@ -1240,7 +1240,6 @@ private struct LibraryView: View {
         case library
         case collections
         case templates
-        case search
     }
 
     private enum Filter: String, CaseIterable {
@@ -1278,7 +1277,7 @@ private struct LibraryView: View {
         default: .library
         }
         self._tab = State(initialValue: initialTab)
-        self._hasShownGrid = State(initialValue: initialTab == .library || initialTab == .search)
+        self._hasShownGrid = State(initialValue: initialTab == .library)
         self._hasShownCollections = State(initialValue: initialTab == .collections)
     }
     @State private var tab: Tab = .library
@@ -1291,6 +1290,7 @@ private struct LibraryView: View {
     @State private var dragSelection: LibraryDragSelection?
     @State private var selectionSharePayload: LibrarySharePayload?
     @State private var searchText = ""
+    @FocusState private var searchIsFocused: Bool
     @State private var detailItem: MediaItem?
     @State private var showDeleteConfirmation = false
     @State private var deleteErrorMessage: String?
@@ -1313,10 +1313,9 @@ private struct LibraryView: View {
 
     private var pageTitle: String {
         if tab == .collections { return "Work Folders" }
-        if tab == .templates { return "Templates" }
-        if tab == .search { return "Find Records" }
-        if albumScope == .unassigned { return "Unfiled Records" }
-        return activeAlbum?.name ?? "Work Records"
+        if tab == .templates { return "Reports" }
+        if albumScope == .unassigned { return "Unfiled Photos" }
+        return activeAlbum?.name ?? "Work Photos"
     }
 
     private var scopedItems: [MediaItem] {
@@ -1330,7 +1329,7 @@ private struct LibraryView: View {
     private var displayedItems: [MediaItem] {
         return scopedItems.filter { item in
             filter.includes(item) &&
-            (tab != .search || searchIndex.matches(item, query: searchText))
+            searchIndex.matches(item, query: searchText)
         }
     }
 
@@ -1341,25 +1340,17 @@ private struct LibraryView: View {
 
                 // Retain visited pages and their thumbnail/scroll state across tab changes.
                 ZStack(alignment: .top) {
-                    if hasShownGrid || tab == .library || tab == .search {
+                    if hasShownGrid || tab == .library {
                         VStack(spacing: 0) {
-                            if tab == .search {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "magnifyingglass")
-                                    TextField("Search objects, text or filenames", text: $searchText)
-                                        .textInputAutocapitalization(.never)
-                                        .autocorrectionDisabled()
-                                }
-                                .padding(12)
-                                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                                .padding()
+                            photoSearchField
+                            if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 searchIndexStatus
                             }
                             grid
                         }
-                        .opacity(tab == .library || tab == .search ? 1 : 0)
-                        .allowsHitTesting(tab == .library || tab == .search)
-                        .accessibilityHidden(tab != .library && tab != .search)
+                        .opacity(tab == .library ? 1 : 0)
+                        .allowsHitTesting(tab == .library)
+                        .accessibilityHidden(tab != .library)
                     }
                     if hasShownCollections || tab == .collections {
                         collections
@@ -1400,7 +1391,7 @@ private struct LibraryView: View {
             applyQuickAction()
         }
         .onChange(of: tab) { _, newTab in
-            if newTab == .library || newTab == .search { hasShownGrid = true }
+            if newTab == .library { hasShownGrid = true }
             if newTab == .collections { hasShownCollections = true }
         }
         .onChange(of: quickAction) { _, _ in applyQuickAction() }
@@ -1453,10 +1444,20 @@ private struct LibraryView: View {
         }
         .onChange(of: tab) { _, newTab in
             if newTab == .templates { loadTemplates() }
-            if newTab == .search { searchIndex.start(items: store.items) }
+            searchIsFocused = false
+            if newTab == .library && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                searchIndex.start(items: store.items)
+            }
         }
-        .confirmationDialog("Delete Template?", isPresented: $showTemplateDeleteConfirmation, titleVisibility: .visible) {
-            Button("Delete Template", role: .destructive) {
+        .onChange(of: searchText) { previousQuery, query in
+            resetSelection()
+            if previousQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                searchIndex.start(items: store.items)
+            }
+        }
+        .confirmationDialog("Delete Report?", isPresented: $showTemplateDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete Report", role: .destructive) {
                 guard let templateToDelete else { return }
                 do {
                     let remainingTemplates = templates.filter { $0.id != templateToDelete.id }
@@ -1471,6 +1472,33 @@ private struct LibraryView: View {
         } message: {
             Text("Delete \"\(templateToDelete?.name ?? "")\"? This cannot be undone.")
         }
+    }
+
+    private var photoSearchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.teal)
+            TextField("Search objects, text or filenames", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($searchIsFocused)
+                .submitLabel(.search)
+                .onSubmit { searchIsFocused = false }
+                .accessibilityLabel("Search photos and videos")
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 48)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
     }
 
     private var searchIndexStatus: some View {
@@ -1499,7 +1527,7 @@ private struct LibraryView: View {
     private var templateList: some View {
         List {
             if templates.isEmpty {
-                Text("No saved templates")
+                Text("No saved reports")
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 40)
             } else {
@@ -1517,7 +1545,7 @@ private struct LibraryView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Edit template \(template.name)")
+                    .accessibilityLabel("Edit report \(template.name)")
                     .listRowBackground(Color(uiColor: .secondarySystemBackground))
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -1526,7 +1554,7 @@ private struct LibraryView: View {
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
-                        .accessibilityLabel("Delete template \(template.name)")
+                        .accessibilityLabel("Delete report \(template.name)")
                     }
                 }
             }
@@ -1550,6 +1578,7 @@ private struct LibraryView: View {
         albumScope = nil
         filter = .all
         searchText = ""
+        searchIsFocused = false
         switch request.action {
         case .library: tab = .library
         case .collections: tab = .collections
@@ -1563,7 +1592,7 @@ private struct LibraryView: View {
         do {
             templates = try ReportTemplateStorage.load()
         } catch {
-            deleteErrorMessage = "Saved report templates could not be read."
+            deleteErrorMessage = "Saved reports could not be read."
         }
     }
 
@@ -1599,7 +1628,7 @@ private struct LibraryView: View {
                         .minimumScaleFactor(0.75)
                         .lineLimit(1)
                     Text(tab == .templates
-                         ? "\(templates.count.formatted()) Templates"
+                         ? "\(templates.count.formatted()) Reports"
                          : "\((tab == .collections ? store.items.count : displayedItems.count).formatted()) Items")
                         .font(.system(size: 16, weight: .semibold))
                 }
@@ -1624,7 +1653,7 @@ private struct LibraryView: View {
                             .frame(width: 48, height: 48)
                             .background(.ultraThinMaterial, in: Circle())
                     }
-                    .accessibilityLabel("New Template")
+                    .accessibilityLabel("New Report")
                 } else {
                     Menu {
                         ForEach(Filter.allCases, id: \.self) { option in
@@ -1648,6 +1677,7 @@ private struct LibraryView: View {
                     .background(.ultraThinMaterial, in: Circle())
 
                     Button {
+                        searchIsFocused = false
                         isSelecting.toggle()
                         selectedIDs.removeAll()
                     } label: {
@@ -1695,7 +1725,7 @@ private struct LibraryView: View {
                         albumScope != nil ? "No Items in This Folder" : store.items.isEmpty ? "No captures yet" : "No matching items",
                         systemImage: "photo.on.rectangle",
                         description: Text(albumScope != nil
-                                          ? "Select photos or videos in Records to add them to a folder, or check the current filter."
+                                          ? "Select photos or videos in Photos to add them to a folder, or check the current filter."
                                           : store.items.isEmpty ? "Photos and videos you take appear here." : "Try another filter or search.")
                     )
                     .padding(.top, 60)
@@ -1712,6 +1742,7 @@ private struct LibraryView: View {
                                         selectedIDs.remove(item.id)
                                     }
                                 } else {
+                                    searchIsFocused = false
                                     detailItem = item
                                 }
                             } label: {
@@ -1737,6 +1768,7 @@ private struct LibraryView: View {
                     .padding(16)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .scrollIndicators(.hidden)
             .background(Color(uiColor: .systemBackground))
             .foregroundStyle(.primary)
@@ -1830,7 +1862,7 @@ private struct LibraryView: View {
                 Text("WORK FOLDERS").font(.caption.weight(.bold)).foregroundStyle(.secondary)
                     .padding(.top, 12)
                 LazyVStack(spacing: 12) {
-                    albumCard(name: "Unfiled Records", items: store.unassignedItems,
+                    albumCard(name: "Unfiled Photos", items: store.unassignedItems,
                               symbol: "tray", scope: .unassigned)
                     ForEach(store.albums) { album in
                         albumCard(name: album.name, items: store.items(in: album),
@@ -1954,10 +1986,9 @@ private struct LibraryView: View {
                 .opacity(selectedIDs.isEmpty ? 0.4 : 1)
             } else {
                 HStack(spacing: 4) {
-                    tabButton(.library, symbol: "list.bullet.rectangle", title: "Records")
+                    tabButton(.library, symbol: "list.bullet.rectangle", title: "Photos")
                     tabButton(.collections, symbol: "folder", title: "Folders")
-                    tabButton(.templates, symbol: "doc.text", title: "Templates")
-                    tabButton(.search, symbol: "magnifyingglass", title: "Find")
+                    tabButton(.templates, symbol: "doc.text", title: "Reports")
                 }
             }
         }
@@ -2296,8 +2327,8 @@ private struct ReportTemplateEditor: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Template Name").font(.headline)
-                TextField("Template Name", text: $name)
+                Text("Report Name").font(.headline)
+                TextField("Report Name", text: $name)
                     .textFieldStyle(.roundedBorder)
                 Text("Content").font(.headline)
                 TextEditor(text: $content)
@@ -2308,10 +2339,10 @@ private struct ReportTemplateEditor: View {
                         RoundedRectangle(cornerRadius: 16)
                             .strokeBorder(Color(uiColor: .separator))
                     }
-                    .accessibilityLabel("Template content")
+                    .accessibilityLabel("Report content")
             }
             .padding(20)
-            .navigationTitle(isNew ? "New Template" : "Edit Template")
+            .navigationTitle(isNew ? "New Report" : "Edit Report")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -2332,7 +2363,7 @@ private struct ReportTemplateEditor: View {
         }
         .preferredColorScheme(nil)
         .interactiveDismissDisabled(name != template.name || content != template.content)
-        .alert("Template could not be saved", isPresented: Binding(
+        .alert("Report could not be saved", isPresented: Binding(
             get: { saveError != nil },
             set: { if !$0 { saveError = nil } }
         )) {
@@ -2708,7 +2739,7 @@ private struct MediaDetailView: View {
     private var recordHeader: some View {
         HStack(spacing: 12) {
             Button { dismiss() } label: {
-                Label("Records", systemImage: "arrow.left")
+                Label("Photos", systemImage: "arrow.left")
                     .font(.subheadline.weight(.semibold))
                     .frame(minHeight: 44)
             }
@@ -2981,7 +3012,7 @@ private struct MediaDetailView: View {
                         Button {
                             showTemplates = true
                         } label: {
-                            Label("Templates", systemImage: "doc.text")
+                            Label("Reports", systemImage: "doc.text")
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(Color.blue)
                                 .padding(.horizontal, 14)
@@ -3012,7 +3043,7 @@ private struct MediaDetailView: View {
                         .shadow(color: Color.black.opacity(0.08), radius: 12, y: 5)
                         .accessibilityLabel("Report")
                     if showTemplateNamePrompt {
-                        TextField("Template Name", text: $templateName)
+                        TextField("Report Name", text: $templateName)
                             .foregroundStyle(Color.primary)
                             .padding(12)
                             .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
@@ -3029,7 +3060,7 @@ private struct MediaDetailView: View {
                                 .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
                                 .overlay(Capsule().strokeBorder(Color(uiColor: .separator)))
                             Spacer()
-                            Button("Save Template") {
+                            Button("Save Report") {
                                 saveTemplate()
                                 showTemplateNamePrompt = false
                             }
@@ -3044,7 +3075,7 @@ private struct MediaDetailView: View {
                         .buttonStyle(.plain)
                     } else {
                         HStack {
-                            Button("Save as Template") {
+                            Button("Save to Reports") {
                                 templateName = ""
                                 showTemplateNamePrompt = true
                             }
@@ -3103,7 +3134,7 @@ private struct MediaDetailView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if templates.isEmpty {
-                    Text("No saved templates")
+                    Text("No saved reports")
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 16)
                 } else {
@@ -3871,7 +3902,7 @@ private struct MediaDetailView: View {
         do {
             templates = try ReportTemplateStorage.load()
         } catch {
-            errorMessage = "Saved report templates could not be read."
+            errorMessage = "Saved reports could not be read."
         }
     }
 
@@ -3879,7 +3910,7 @@ private struct MediaDetailView: View {
         do {
             try ReportTemplateStorage.save(templates)
         } catch {
-            errorMessage = "Report templates could not be saved: \(error.localizedDescription)"
+            errorMessage = "Reports could not be saved: \(error.localizedDescription)"
         }
     }
 
