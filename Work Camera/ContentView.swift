@@ -2458,7 +2458,7 @@ private struct MediaDetailView: View {
                     viewerBackground
                     if item.kind == .video {
                         videoViewer(containerSize: geometry.size, landscape: landscape)
-                    } else if landscape {
+                    } else {
                         media
                             .frame(width: geometry.size.width, height: geometry.size.height)
                             .overlay {
@@ -2471,13 +2471,6 @@ private struct MediaDetailView: View {
                                     .padding(safeGeometry.safeAreaInsets)
                                 }
                             }
-                    } else {
-                        VStack(spacing: 0) {
-                            if photoControlsVisible { recordHeader }
-                            media
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            if photoControlsVisible { bottomBar }
-                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2500,8 +2493,8 @@ private struct MediaDetailView: View {
                 }
             }
             // Read control insets outside the full-screen photo container.
-            // Portrait controls retain the system safe area; landscape photo bounds stay fixed.
-            .ignoresSafeArea(.container, edges: item.kind == .photo && (landscape || !photoControlsVisible) ? .all : [])
+            // Photo bounds stay fixed in both orientations while controls use the safe area.
+            .ignoresSafeArea(.container, edges: item.kind == .photo ? .all : [])
         }
         .statusBarHidden(item.kind == .photo && !photoControlsVisible)
         .toolbar(.hidden, for: .navigationBar)
