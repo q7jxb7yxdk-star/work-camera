@@ -24,6 +24,12 @@ struct ContentView: View {
         case zoom
     }
 
+    private struct CameraLayout: Equatable {
+        let size: CGSize
+        let topInset: CGFloat
+        let bottomInset: CGFloat
+    }
+
     @State private var activeSelector: CaptureSelector?
     @ObservedObject var navigation: CameraSceneNavigation
     @StateObject private var store = MediaStore()
@@ -43,8 +49,7 @@ struct ContentView: View {
     @State private var countdownID: UUID?
     @State private var errorMessage: String?
     @State private var deviceOrientation: UIDeviceOrientation = .portrait
-    @State private var portraitCameraInsets: UIEdgeInsets?
-    @State private var portraitCameraSize: CGSize?
+    @State private var portraitCameraLayout: CameraLayout?
 
     private let cameraAccent = Color(red: 0.34, green: 0.88, blue: 0.77)
     private let cameraBackground = Color(red: 0.045, green: 0.09, blue: 0.12)
@@ -62,11 +67,8 @@ struct ContentView: View {
                         navigation.returnToCamera()
                     }
                 }
-            } else if let size = portraitCameraSize {
-                cameraPage(size: size)
             } else {
-                // Camera entry waits for its first portrait layout.
-                Color(uiColor: .systemBackground).ignoresSafeArea()
+                cameraPage
             }
         }
         .background {
@@ -148,7 +150,7 @@ struct ContentView: View {
     }
 
     private var shouldKeepScreenAwake: Bool {
-        scenePhase == .active && portraitCameraSize != nil && !libraryFlowActive
+        scenePhase == .active && !libraryFlowActive
     }
 
     private var shouldRunCameraLevel: Bool {
@@ -170,17 +172,15 @@ struct ContentView: View {
 
     private func updateCameraScene(_ scene: UIWindowScene) {
         navigation.attach(to: scene)
-        guard portraitCameraSize == nil,
-              scene.effectiveGeometry.interfaceOrientation == .portrait,
+        guard scene.effectiveGeometry.interfaceOrientation == .portrait,
               let window = scene.windows.first(where: \.isKeyWindow) ?? scene.windows.first else { return }
-        window.layoutIfNeeded()
-        let insets = window.safeAreaInsets
         let size = window.bounds.size
-        guard insets != .zero, size.width > 0, size.height > 0,
-              size.height >= size.width else { return }
-        portraitCameraInsets = insets
-        portraitCameraSize = CGSize(width: min(size.width, size.height),
-                                    height: max(size.width, size.height))
+        guard size.width > 0, size.height >= size.width else { return }
+        let insets = window.safeAreaInsets
+        let layout = CameraLayout(size: size, topInset: insets.top, bottomInset: insets.bottom)
+        if portraitCameraLayout != layout {
+            portraitCameraLayout = layout
+        }
     }
 
     // The capture workspace stays in portrait coordinates; compact tool labels follow the device.
@@ -193,20 +193,34 @@ struct ContentView: View {
         }
     }
 
-    private func cameraPage(size: CGSize) -> some View {
-        FixedPortraitCameraCanvas(
-            portraitSize: size,
-            content: cameraCanvas(size: size)
-        )
-        .ignoresSafeArea()
+    private var cameraPage: some View {
+        GeometryReader { safeGeometry in
+            GeometryReader { geometry in
+                let size = geometry.size
+                let insets = safeGeometry.safeAreaInsets
+                // Window geometry can arrive late or differ from the visible container.
+                let layout = portraitCameraLayout.flatMap { $0.size == size ? $0 : nil }
+                    ?? CameraLayout(size: size, topInset: insets.top, bottomInset: insets.bottom)
+
+                if size.width > 0, size.height > 0 {
+                    FixedPortraitCameraCanvas(
+                        portraitSize: size,
+                        content: cameraCanvas(layout: layout)
+                    )
+                } else {
+                    cameraBackground
+                }
+            }
+            .ignoresSafeArea(.container)
+        }
         .environment(\.colorScheme, .dark)
     }
 
-    private func cameraCanvas(size: CGSize) -> some View {
-        let deviceWidth = size.width
-        let deviceHeight = size.height
-        let cameraEdgeInset = portraitCameraInsets?.top ?? 0
-        let bottomSafeAreaInset = portraitCameraInsets?.bottom ?? 0
+    private func cameraCanvas(layout: CameraLayout) -> some View {
+        let deviceWidth = layout.size.width
+        let deviceHeight = layout.size.height
+        let cameraEdgeInset = layout.topInset
+        let bottomSafeAreaInset = layout.bottomInset
         let isVideo = camera.mode == .video
         let previewRatio: CGFloat = camera.mode == .photo ? 4 / 3 : 16 / 9
         // Keep PHOTO geometry unchanged; VIDEO reserves the compact 64pt action panel.
